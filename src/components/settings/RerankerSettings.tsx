@@ -352,7 +352,16 @@ const RerankerModelSelect: React.FC<FloatingSelectProps> = ({
                 disabled={disabled}
                 className={`aip-select-trigger cursor-pointer flex items-center justify-between w-full ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className}`}
             >
-                <span className="truncate pr-2 text-xs font-medium text-white">{resolvedLabel}</span>
+                {/* Exactly EmbeddingSettings' trigger label: `text-xs`, nothing
+                    else. The `font-medium text-white` this carried made the
+                    Active Reranker read brighter and heavier than Active
+                    Embedding Model directly above it on the Retrieval page —
+                    and `text-white` is a hard-coded colour that overrode
+                    `.aip-select-trigger`'s themed `var(--aip-primary)`, so in
+                    LIGHT theme the label stayed pure white on a light button
+                    and was invisible (measured: embedding flipped to
+                    rgb(55,65,81), this stayed rgb(255,255,255)). */}
+                <span className="truncate pr-2 text-xs">{resolvedLabel}</span>
                 <ChevronDown size={14} strokeWidth={1.75} className={`aip-select-chevron transition-transform duration-150 shrink-0 ${isOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
             </button>
 
