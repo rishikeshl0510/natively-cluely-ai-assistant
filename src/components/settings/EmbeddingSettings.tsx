@@ -551,17 +551,16 @@ export const EmbeddingSettings: React.FC<EmbeddingSettingsProps> = ({ renderPart
 
         const dims = active.dimensions || mod?.dimensions || (providerId === 'gemini' ? 3072 : providerId === 'openai' ? 1536 : providerId === 'local' ? 384 : 768);
 
-        const isLocal = active.location === 'on-device' || (prov ? !prov.cloud : (providerId === 'local' || providerId === 'ollama'));
-        const isCloud = active.location === 'cloud' || (prov ? prov.cloud : (providerId === 'gemini' || providerId === 'openai' || providerId === 'natively'));
-        const locationStr = isLocal ? t('On-device') : isCloud ? t('Cloud') : t('On-device');
-
+        /* No location segment. "Cloud" / "On-device" was a third clause on a
+           line that is already dimensions + a re-index warning, and the
+           provider card for this model states its location in its own header —
+           on the Retrieval page that card is a scroll away in the same view. */
         return {
             dims,
-            locationStr,
             providerName: prov?.name || providerId,
             modelLabel: mod?.label || modelId,
         };
-    }, [active, providers, t]);
+    }, [active, providers]);
 
     const CARD_ORDER = ['gemini', 'openai', 'voyage', 'openrouter', 'ollama', 'custom'] as const;
     const cardProviders = useMemo(
@@ -941,7 +940,7 @@ export const EmbeddingSettings: React.FC<EmbeddingSettingsProps> = ({ renderPart
                         </label>
                         <p className="text-[10px] aip-muted mt-0.5">
                             {active.configured && activeModelDetails
-                                ? `${activeModelDetails.dims} dimensions · ${activeModelDetails.locationStr} · ${t('Changing model re-indexes your project')}`
+                                ? `${activeModelDetails.dims} dimensions · ${t('Changing model re-indexes your project')}`
                                 : active.configured
                                     ? `${t('Configured')} · ${t('Changing model re-indexes your project')}`
                                     : t('Natively could not resolve an embedding provider.')}
