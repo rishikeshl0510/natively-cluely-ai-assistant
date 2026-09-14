@@ -9,6 +9,7 @@
 import './nativeArchGate';
 
 import { buildEmbeddingConfig } from './rag/embeddingConfigIdentity';
+import type { ScreenUnderstandingResult } from './services/screen/ScreenUnderstandingService';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, systemPreferences, screen, desktopCapturer } from "electron"
 import * as crypto from "crypto"
 import path from "path"
@@ -3295,7 +3296,7 @@ export class AppState {
       if (!this.contentTraceEnabled()) return;
       console.log(`[AutoAnswer:text] ${label}\n    “${text}”`);
     },
-    dispatch: (question, { reuseSpeculative }) => {
+    dispatch: async (question, { reuseSpeculative }) => {
       // Renderer signal (2026-09, "still shows Waiting for a question" fix):
       // the judge already approved this candidate and dispatch is starting —
       // real work (retrieval + generation) begins here, but none of the
@@ -3306,7 +3307,13 @@ export class AppState {
       try {
         this.sendToWindow(this.getMainWindow(), 'intelligence-auto-answer-started', {});
       } catch { /* UI hint only — never block dispatch */ }
-      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
+      // Live screen context (docs/specs/live-screen-context-spec.md): the
+      // tiered freshness policy itself bounds this to at most
+      // LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS (~700ms, tier 2 only) — tiers
+      // 1/3/4 return immediately. Resolved here, not inside IntelligenceEngine,
+      // since screenshot capture is AppState territory.
+      const screenContext = await this.resolveLiveScreenContextForAnswer().catch(() => undefined);
+      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, screenContext }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
       });
     },
@@ -3316,7 +3323,17 @@ export class AppState {
     // the judge is still deciding.
     noteCandidate: (id, gen) => this.intelligenceManager.noteAutoAnswerCandidate(id, gen),
     speculativeSnapshot: () => this.intelligenceManager.getSpeculativeSnapshot(),
-    prefetchAnswer: (id, text) => this.intelligenceManager.prefetchAutoAnswer(id, text),
+    prefetchAnswer: (id, text) => {
+      this.intelligenceManager.prefetchAutoAnswer(id, text);
+      // Live screen context (docs/specs/live-screen-context-spec.md): same
+      // "a candidate is stabilizing, worth spending on" signal the answer
+      // prefetch already uses — keeps the description current through the
+      // rest of the session without a blind timer. No-op when the flag is
+      // off or the last description is still fresh; never awaited.
+      this.refreshLiveScreenContext().catch((err) => {
+        console.warn('[LiveScreenContext] prefetch-signal refresh failed (non-fatal):', err?.message || err);
+      });
+    },
     ...((process.env.NATIVELY_AUTO_ANSWER_JUDGE || '').toLowerCase() === 'off' ? {} : {
       judgeCandidate: async (req) => {
         const llm = this.processingHelper?.getLLMHelper?.();
@@ -6156,6 +6173,14 @@ export class AppState {
   private async startMeetingTransition(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
     this.simpleAutoAnswer.onMeetingStart();
+    // Live screen context (docs/specs/live-screen-context-spec.md): fire the
+    // FIRST background description in parallel with transcription spinning
+    // up, not awaited — a no-op when liveScreenContextEnabled is off. Gets a
+    // description ready before the first question ever lands instead of the
+    // first Auto-Answer of the meeting always starting from nothing.
+    this.refreshLiveScreenContext().catch((err) => {
+      console.warn('[LiveScreenContext] meeting-start refresh failed (non-fatal):', err?.message || err);
+    });
 
     // If a previous endMeeting() is still draining STT in the background, wait
     // for it to finish before we boot a new session — otherwise the BG teardown
@@ -6889,7 +6914,18 @@ export class AppState {
         answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(),
         ...(ikCitationsAnswer && ikCitationsAnswer.length ? { citations: ikCitationsAnswer } : {}),
       })
-
+      // Phone Mirror (2026-09-14 fix): this is the ONLY live-answer trigger
+      // (manual chat's own generation path publishes to PhoneMirrorService
+      // itself, from ipcHandlers.ts) — but this auto-answer emitter never did,
+      // so a phone paired via Settings > Phone Mirror connected fine (the
+      // client count went up) and then simply never received any answer
+      // content for a real interview turn. streamId matches the token
+      // handler below so publishDone finalizes the same livePartial.
+      try {
+        PhoneMirrorService.getInstance().publishDone(String(generationId ?? 'auto-answer'), answer);
+      } catch (_) {
+        /* noop — phone mirroring must never break the primary answer path */
+      }
     })
 
     this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number, generationId?: number) => {
@@ -6898,6 +6934,13 @@ export class AppState {
       // drop a batch belonging to a superseded live answer. Undefined for the
       // other live streams (code hint / brainstorm) — id-less items are accepted.
       queueBatch('suggested_answer', { token, question, confidence, generationId });
+      // Phone Mirror: see the 'suggested_answer' (final) handler above for why
+      // this call was missing entirely until now.
+      try {
+        PhoneMirrorService.getInstance().publishToken(String(generationId ?? 'auto-answer'), token);
+      } catch (_) {
+        /* noop */
+      }
     })
 
     // Orphaned-scaffold fix: a what-to-answer stream that already showed a
@@ -6938,13 +6981,14 @@ export class AppState {
     this.intelligenceManager.on('refined_answer_token', (token: string, intent: string) => {
       // Sprint 9: batch.
       queueBatch('refined_answer', { token, intent });
+      try { PhoneMirrorService.getInstance().publishToken('refined-answer', token); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('refined_answer', (answer: string, intent: string) => {
       flushBatchesBeforeFinal();
       const win = mainWindow()
       this.sendToWindow(win, 'intelligence-refined-answer', { answer, intent })
-
+      try { PhoneMirrorService.getInstance().publishDone('refined-answer', answer); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('recap', (summary: string) => {
@@ -6956,11 +7000,13 @@ export class AppState {
       // only ever hold a STALE value from an unrelated prior answer turn —
       // attaching it here would misattribute sources to this recap.
       this.sendToWindow(win, 'intelligence-recap', { summary })
+      try { PhoneMirrorService.getInstance().publishDone('recap', summary); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('recap_token', (token: string) => {
       // Sprint 9: batch.
       queueBatch('recap', { token });
+      try { PhoneMirrorService.getInstance().publishToken('recap', token); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('clarify', (clarification: string) => {
@@ -6970,11 +7016,13 @@ export class AppState {
       // clarifyLLM with no retrieval step — see the 'recap' handler above
       // for why attaching lastInterviewKnowledgeCitations here would be wrong.
       this.sendToWindow(win, 'intelligence-clarify', { clarification })
+      try { PhoneMirrorService.getInstance().publishDone('clarify', clarification); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('clarify_token', (token: string) => {
       // Sprint 9: batch.
       queueBatch('clarify', { token });
+      try { PhoneMirrorService.getInstance().publishToken('clarify', token); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('follow_up_questions_update', (questions: string) => {
@@ -6985,11 +7033,13 @@ export class AppState {
       // 'recap' handler above for why lastInterviewKnowledgeCitations would
       // be wrong to attach here.
       this.sendToWindow(win, 'intelligence-follow-up-questions-update', { questions })
+      try { PhoneMirrorService.getInstance().publishDone('follow-up-questions', questions); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('follow_up_questions_token', (token: string) => {
       // Sprint 9: batch.
       queueBatch('follow_up_questions', { token });
+      try { PhoneMirrorService.getInstance().publishToken('follow-up-questions', token); } catch (_) { /* noop */ }
     })
 
     this.intelligenceManager.on('manual_answer_started', () => {
@@ -7419,6 +7469,165 @@ export class AppState {
     return this.withScreenshotCaptureSession('full', restoreFocus, (session) =>
       this.screenshotHelper.takeScreenshot(this.getTargetDisplayForFullScreenshot(session))
     )
+  }
+
+  // ── Live screen context (docs/specs/live-screen-context-spec.md) ─────────
+  // Background screen-description capture feeding Auto-Answer as text
+  // context, gated by the `liveScreenContextEnabled` flag (default off).
+  // Lives on AppState (not IntelligenceEngine) because capturing a
+  // screenshot is main-process/AppState territory — takeScreenshot() above
+  // is the exact same capture this reuses, just without a user action
+  // behind it.
+  private liveScreenContext: ScreenUnderstandingResult | null = null;
+  private liveScreenContextRefreshPromise: Promise<void> | null = null;
+  private static readonly LIVE_SCREEN_CONTEXT_FRESH_MS = 15_000;
+  private static readonly LIVE_SCREEN_CONTEXT_STALE_CEILING_MS = 45_000;
+  private static readonly LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS = 700;
+
+  private liveScreenContextGateOpen(): { open: boolean; mode?: string; scopesAllow?: boolean } {
+    try {
+      const settings = SettingsManager.getInstance();
+      if (!settings.get('liveScreenContextEnabled')) return { open: false };
+      const providerScopes = settings.get('providerDataScopes') || {};
+      if (providerScopes.screenshots === false) return { open: false, scopesAllow: false };
+      return { open: true, mode: settings.getScreenUnderstandingMode(), scopesAllow: true };
+    } catch {
+      return { open: false };
+    }
+  }
+
+  /**
+   * Fire-and-forget refresh. Called from two places per the spec: once at
+   * meeting start (parallel with transcription spinning up, so a first
+   * description is ready before the first question), and once alongside
+   * every SimpleAutoAnswerEngine prefetch (keeps it current for the rest of
+   * the session). Joins an already-running refresh instead of starting a
+   * second one, and no-ops if a description younger than the fresh window
+   * already exists — this is what keeps a burst of prefetch signals in the
+   * same stability window from each paying for their own capture.
+   */
+  public async refreshLiveScreenContext(): Promise<void> {
+    if (this.liveScreenContextRefreshPromise) return this.liveScreenContextRefreshPromise;
+    const gate = this.liveScreenContextGateOpen();
+    if (!gate.open) return;
+    if (
+      this.liveScreenContext &&
+      Date.now() - this.liveScreenContext.capturedAt < AppState.LIVE_SCREEN_CONTEXT_FRESH_MS
+    ) {
+      return;
+    }
+    // BUG FIX (2026-09-14, "the overlay is not opening"): takeScreenshot()'s
+    // hide/restore session snapshots the CURRENT window mode and actively
+    // re-asserts it on restore (restoreWindowsAfterScreenshot →
+    // switchToOverlay/switchToLauncher based on that snapshot) — correct for
+    // a user-triggered hotkey press, where the mode is stable for the whole
+    // ~100-200ms hide/capture/restore window. It is NOT safe for an
+    // automatically-triggered background capture: the meeting-start trigger
+    // fires before the app has switched from launcher to overlay mode for
+    // the new meeting, so its restore step forced the window BACK to
+    // launcher — confirmed live in the debug log ("Switching to LAUNCHER"
+    // firing right after this capture's "Screenshot successful", at the
+    // exact moment a meeting was starting; the overlay process itself was
+    // still running, just never shown). Only capture when the app is
+    // ALREADY confirmed to be in overlay mode, so the snapshot can never be
+    // stale — the meeting-start trigger simply no-ops in the (common) case
+    // the switch hasn't happened yet, and the prefetch-signal trigger
+    // (firing well after the meeting has stabilized) picks up the slack.
+    if (this.windowHelper.getCurrentWindowMode() !== 'overlay') return;
+    const run = this._refreshLiveScreenContextInner(gate.mode!);
+    this.liveScreenContextRefreshPromise = run.finally(() => {
+      this.liveScreenContextRefreshPromise = null;
+    });
+    return this.liveScreenContextRefreshPromise;
+  }
+
+  private async _refreshLiveScreenContextInner(mode: string): Promise<void> {
+    try {
+      const screenshotPath = await this.takeScreenshot(false);
+      const { getScreenUnderstandingService } = require('./services/screen/ScreenUnderstandingService');
+      const { buildGeminiOnlyVisionProviders } = require('./services/screen/VisionProviderRegistry');
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const settings = SettingsManager.getInstance();
+      const credentials = CredentialsManager.getInstance();
+      const providerScopes = settings.get('providerDataScopes') || {};
+      const scopeAllowsScreenshots = providerScopes.screenshots !== false;
+      const localOnly = mode === 'private_vision';
+      const buildInputs = { mode, localOnly, scopeAllowsScreenshots };
+
+      const result: ScreenUnderstandingResult = await getScreenUnderstandingService().understand({
+        modeId: 'live-screen-context',
+        // 'transcribe': the existing action for "describe the screen, don't
+        // answer a specific question" (ScreenUnderstandingService.ts:59) —
+        // exactly the shape this needs, no new UserAction variant required.
+        userAction: 'transcribe',
+        qualityMode: 'fast',
+        imagePaths: [screenshotPath],
+        screenUnderstandingMode: mode,
+        providerPolicy: {
+          localOnly,
+          allowScreenshots: scopeAllowsScreenshots,
+          visionAvailable: credentials.anyVisionProviderConfigured?.() ?? true,
+          localVisionAvailable: credentials.anyLocalVisionProviderConfigured?.() ?? false,
+          // Pins this call to Gemini (or local, under private_vision) instead
+          // of the default fallback order — see buildGeminiOnlyVisionProviders's
+          // own doc comment for why.
+          __providersOverride: buildGeminiOnlyVisionProviders(buildInputs),
+        },
+      });
+
+      // Deliberately NOT written through putScreenshotDescription /
+      // ScreenshotDescriptionStore — that cache belongs solely to
+      // transcribeScreenForMemory() (see its "ONLY transcribeScreenForMemory
+      // writes this cache" contract, ipcHandlers.ts). This is a separate,
+      // forward-looking store with its own freshness contract.
+      if (result?.status === 'available') {
+        this.liveScreenContext = result;
+        const summary = result.visibleSummary || result.extractedText || result.ocrText || '';
+        if (summary) {
+          try {
+            this.sendToWindow(this.getMainWindow(), 'live-screen-context-updated', {
+              summary,
+              capturedAt: result.capturedAt,
+            });
+          } catch { /* UI hint only — never fail the refresh over a send error */ }
+        }
+      }
+    } catch (err: any) {
+      console.warn('[LiveScreenContext] refresh failed (non-fatal):', err?.message || err);
+    }
+  }
+
+  /**
+   * Tiered freshness resolution for a live answer that wants screen context
+   * right now (docs/specs/live-screen-context-spec.md). Never blocks longer
+   * than LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS, and degrades to `undefined`
+   * (today's exact no-screen-context behavior) rather than falling back to a
+   * fresh synchronous capture, which would silently reintroduce the blocking
+   * latency this feature exists to remove.
+   */
+  public async resolveLiveScreenContextForAnswer(): Promise<ScreenUnderstandingResult | undefined> {
+    if (!this.liveScreenContextGateOpen().open) return undefined;
+    const now = Date.now();
+    // Tier 1: fresh.
+    if (this.liveScreenContext && now - this.liveScreenContext.capturedAt < AppState.LIVE_SCREEN_CONTEXT_FRESH_MS) {
+      return this.liveScreenContext;
+    }
+    // Tier 2: a refresh is already running — wait briefly, but bounded.
+    if (this.liveScreenContextRefreshPromise) {
+      await Promise.race([
+        this.liveScreenContextRefreshPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, AppState.LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS)),
+      ]).catch(() => {});
+      if (this.liveScreenContext && Date.now() - this.liveScreenContext.capturedAt < AppState.LIVE_SCREEN_CONTEXT_FRESH_MS) {
+        return this.liveScreenContext;
+      }
+    }
+    // Tier 3: stale but still usable.
+    if (this.liveScreenContext && Date.now() - this.liveScreenContext.capturedAt < AppState.LIVE_SCREEN_CONTEXT_STALE_CEILING_MS) {
+      return this.liveScreenContext;
+    }
+    // Tier 4: too stale or absent — no screen context, same as today.
+    return undefined;
   }
 
   /**

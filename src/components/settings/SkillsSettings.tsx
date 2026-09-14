@@ -419,7 +419,7 @@ export const SkillsSettings: React.FC = () => {
                 <div>
                     <h3 className="text-lg font-bold text-text-primary mb-1">{t('Skills')}</h3>
                     <p className="text-xs text-text-secondary">
-                        {t('Local SKILL.md instructions. Enabled skills apply themselves automatically when your message matches a trigger phrase the skill defines — no typing a command. Turn a skill off here if it keeps firing when you don\'t want it to.')}
+                        {t('A Skill is a Q&A answer template — any topic (coding, behavioral, sales, anything): when a question like this comes up, answer it like this. Enabled skills apply automatically, typed or live, whenever a question matches a trigger phrase the skill defines — no typing a command. Turn a skill off here if it keeps firing when you don\'t want it to.')}
                     </p>
                 </div>
                 <button

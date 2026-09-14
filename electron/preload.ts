@@ -574,6 +574,11 @@ interface ElectronAPI {
   onIntelligenceAutoAnswerStarted: (
     callback: () => void,
   ) => () => void;
+  /** docs/specs/live-screen-context-spec.md — pushed when the background
+   *  screen-description refresh completes. */
+  onLiveScreenContextUpdated: (
+    callback: (data: { summary: string; capturedAt: number }) => void,
+  ) => () => void;
   onIntelligenceCodeVerified: (
     callback: (data: { question: string; passed: number; total: number; language: string }) => void,
   ) => () => void;
@@ -2124,6 +2129,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('intelligence-auto-answer-started', subscription);
     return () => {
       ipcRenderer.removeListener('intelligence-auto-answer-started', subscription);
+    };
+  },
+  // docs/specs/live-screen-context-spec.md — pushed whenever AppState's
+  // background refresh (meeting-start / prefetch-signal triggers) completes
+  // a new description. No-op sender when liveScreenContextEnabled is off.
+  onLiveScreenContextUpdated: (
+    callback: (data: { summary: string; capturedAt: number }) => void,
+  ) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('live-screen-context-updated', subscription);
+    return () => {
+      ipcRenderer.removeListener('live-screen-context-updated', subscription);
     };
   },
   // Orphaned-scaffold fix: drop the open what-to-answer scaffold row when a

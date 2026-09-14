@@ -98,9 +98,18 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     // loudly instead of silently dropping it, since this is exactly the failure
     // mode behind "asked a question, got no answer, and it wasn't reported".
     private lastUncommittedPartial = '';
-    // Armed on every partial_transcript, cancelled on committed_transcript —
-    // see LOCAL_SILENCE_PROMOTE_MS above.
+    // Armed on every GENUINELY NEW partial_transcript, cancelled on
+    // committed_transcript — see LOCAL_SILENCE_PROMOTE_MS above.
     private localSilenceTimer: NodeJS.Timeout | null = null;
+    // The exact text of the last thing THIS class promoted to final (either
+    // via the local-silence timer or the close-handler fallback). ElevenLabs
+    // periodically resends an unchanged partial_transcript even with no new
+    // speech — without this, that resend looked identical to fresh content
+    // arriving after a promotion (lastUncommittedPartial is '' right after
+    // promoting), re-arming the timer and re-finalizing the SAME already-
+    // judged text. Exact-match against this is enough: any genuine growth
+    // produces a different string and is treated as new content normally.
+    private lastPromotedText = '';
 
     private debugWriteStream: fs.WriteStream | null = null;
     
@@ -176,6 +185,7 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         if (!this.lastUncommittedPartial) return;
         const text = this.lastUncommittedPartial;
         this.lastUncommittedPartial = '';
+        this.lastPromotedText = text;
         this.clearLocalSilenceTimer();
         console.warn(`${this.tag()} Promoting uncommitted partial to final (${reason}): "${text}"`);
         this.emit('transcript', { text, isFinal: true, confidence: 1.0 });
@@ -237,6 +247,7 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         this.pcmAccumulatorLen = 0;
         this.consecutiveSilentBuffers = 0;
         this.lastUncommittedPartial = '';
+        this.lastPromotedText = '';
         this.clearLocalSilenceTimer();
         if (this.debugWriteStream) {
             this.debugWriteStream.end();
@@ -511,8 +522,28 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
 
                     case 'partial_transcript':
                         if (msg.text) {
-                            this.lastUncommittedPartial = msg.text;
-                            this.armLocalSilenceTimer();
+                            // RE-ENABLED (2026-09-14) with real content-change
+                            // gating, per the incident right after this first
+                            // shipped: ElevenLabs periodically resends an
+                            // UNCHANGED partial_transcript with no new speech.
+                            // Without checking against lastPromotedText, that
+                            // resend looked like fresh content the moment right
+                            // after a promotion (lastUncommittedPartial is ''
+                            // then), re-arming the timer and re-"finalizing" text
+                            // that was already judged seconds earlier — measured
+                            // live at 80+ judge calls in 17 minutes, several of
+                            // them on byte-identical text. The 1.2s interval
+                            // itself is unchanged and still fires on every real
+                            // pause — that's intentional (see LOCAL_SILENCE_PROMOTE_MS).
+                            // What's gated is re-arming/re-promoting on text that
+                            // has not actually changed since it was last pending
+                            // or last promoted, not the pace of the timer.
+                            const isStaleResendOfPromoted = msg.text === this.lastPromotedText;
+                            const isUnchangedPending = msg.text === this.lastUncommittedPartial;
+                            if (!isStaleResendOfPromoted) {
+                                this.lastUncommittedPartial = msg.text;
+                                if (!isUnchangedPending) this.armLocalSilenceTimer();
+                            }
                             this.emit('transcript', {
                                 text: msg.text,
                                 isFinal: false,

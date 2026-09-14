@@ -83,6 +83,18 @@ export interface SuggestionTrigger {
     candidateGeneration?: number;
     /** The controller verified (by id or embedding cosine) that the speculative cache answers THIS question. */
     reuseSpeculative?: boolean;
+    /**
+     * Live screen context (docs/specs/live-screen-context-spec.md), resolved
+     * by AppState.resolveLiveScreenContextForAnswer() before dispatch.
+     * Typed `any` deliberately: it carries a `ScreenUnderstandingResult`
+     * (electron/services/screen/ScreenUnderstandingService.ts), which
+     * ipcHandlers.ts's manual path already passes through an `any`-typed
+     * local for this exact reason (its optional fields don't structurally
+     * satisfy ScreenContext's required ones, but ScreenUnderstandingResult
+     * deliberately backfills ocrText/imagePath/hash/timestamp "for
+     * PromptAssembler compatibility" — same bridge, same justification).
+     */
+    screenContext?: any;
 }
 
 // Context item matching Swift ContextManager structure

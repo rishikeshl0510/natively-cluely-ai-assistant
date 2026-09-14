@@ -16034,6 +16034,13 @@ export function initializeIpcHandlers(appState: AppState): void {
         stagingRoot: os.tmpdir(),
         autoInstall: opts?.autoInstall ?? false,
       });
+      // SkillInstaller writes straight to disk without going through
+      // SkillsManager — the directory watcher will eventually invalidate the
+      // in-memory skills cache, but calling this explicitly makes a freshly
+      // installed skill visible to the very next listSkills() rather than
+      // racing an async fs event. Harmless no-op when nothing was installed
+      // (a preview-only call, or a validation failure).
+      Manager.getInstance().invalidateCache();
       return outcome;
     } catch (e: any) {
       console.warn('[IPC] skills:upload error:', e?.message || e);

@@ -284,6 +284,8 @@ export interface AppSettings {
     capabilityProbeEnabled?: boolean;
     adaptiveConnectTimeoutEnabled?: boolean;
     adaptiveImageQualityEnabled?: boolean;
+    // docs/specs/live-screen-context-spec.md — default OFF in the flag registry.
+    liveScreenContextEnabled?: boolean;
 }
 
 export const VALID_CONTEXT_DEBUG_LEVELS = ['off', 'standard', 'verbose'] as const;

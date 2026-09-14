@@ -6,6 +6,7 @@ import {
   Code,
   Copy,
   Check,
+  Eye,
   Globe,
   HelpCircle,
   Image,
@@ -1681,6 +1682,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // is in progress.
   const [rollingTranscriptUser, setRollingTranscriptUser] = useState('');
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  // docs/specs/live-screen-context-spec.md — latest background screen
+  // description, purely for display above the transcript. Empty until the
+  // first refresh completes (meeting start, or the flag being off entirely,
+  // in which case this simply never populates and the block below never
+  // renders — see the `liveScreenDescription ? ... : null` gate at its
+  // render site).
+  const [liveScreenDescription, setLiveScreenDescription] = useState('');
   const userSpeakingRef = useRef(false);
   const rollingPartialDebounceUserRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRollingPartialUserRef = useRef<string | null>(null);
@@ -6285,6 +6293,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
+      // docs/specs/live-screen-context-spec.md — pushed when the background
+      // screen-description refresh completes (meeting-start or prefetch-signal
+      // triggered). Purely additive display; never gates isProcessing or any
+      // answer-flow state above.
+      window.electronAPI.onLiveScreenContextUpdated?.((data) => {
+        if (data?.summary) setLiveScreenDescription(data.summary);
+      }) ?? (() => {}),
+    );
+
+    cleanups.push(
       window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
@@ -10006,6 +10024,26 @@ Provide only the answer, nothing else.`;
                   </div>
                 </div>
               )}
+
+              {/* Live Screen Context (docs/specs/live-screen-context-spec.md) —
+                  positioned ABOVE the transcript bar deliberately, per the
+                  spec's UI ordering: description, then transcript, then
+                  answer. Purely a display of what the background capture
+                  already feeds the answering model as text context — never
+                  gates or blocks anything below it. Renders nothing until
+                  the first successful capture (liveScreenDescription is ''
+                  when the flag is off, or before the first refresh lands). */}
+              {liveScreenDescription ? (
+                <div className="mx-4 mt-3 mb-1 px-3.5 py-2 bg-blue-500/[0.06] border border-blue-500/15 rounded-[12px] no-drag">
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold text-blue-600/80 dark:text-blue-400/80 uppercase tracking-wide mb-1">
+                    <Eye className="w-3 h-3" />
+                    {t('Screen')}
+                  </div>
+                  <p className="text-[11.5px] text-black/70 dark:text-white/65 leading-snug line-clamp-2">
+                    {liveScreenDescription}
+                  </p>
+                </div>
+              ) : null}
 
               {/* Rolling Transcript Bar — live transcript + on-demand diagnostics
                   for hard failures. Reconnecting/awaiting-audio status is owned by

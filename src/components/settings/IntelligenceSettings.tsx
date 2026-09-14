@@ -71,6 +71,7 @@ const FLAG_META: Record<string, { label: string; desc: string; group: string; ti
   inMeetingSearchV2: { label: 'Search current meeting', desc: 'Search the live transcript of the meeting you’re in, with timestamps. Currently reachable only from "Try it" below.', group: 'Search', tier: 'advanced' },
   lectureIntelligenceV2: { label: 'Lecture notes', desc: 'Turns a lecture into structured notes, flashcards, and practice questions. Currently reachable only from "Try it" below.', group: 'Lecture & diagrams', tier: 'advanced' },
   diagramIntelligence: { label: 'Diagrams', desc: 'Draws a diagram to explain a concept during a lecture. Currently reachable only from "Try it" below.', group: 'Lecture & diagrams', tier: 'advanced' },
+  liveScreenContextEnabled: { label: 'Automatic screen context', desc: 'Periodically describes your screen in the background so automatic answers can reference it without waiting on a live capture. Off, screen understanding only runs when you manually ask about your screen.', group: 'Screen & vision', tier: 'advanced' },
   // ── Developer options: the ONE diagnostic a user or support agent may legitimately flip ─
   // Everything else that used to live here (contextRouterV2 / liveTranscriptBrain /
   // promptAssemblerV2 / intelligenceOsEnabled / durableMemoryWindow) was removed
@@ -90,7 +91,7 @@ const HINDSIGHT_FLAG_KEYS = new Set(['hindsightMemory', 'hindsightPostMeetingRet
 // groups named here, so a FLAG_META entry whose group is missing from it is
 // silently dropped and its toggle never appears. Adding a group to FLAG_META
 // without adding it here is a no-op that typechecks.
-const ADVANCED_GROUP_ORDER = ['Memory', 'Answer quality', 'Search', 'Lecture & diagrams', 'Provider performance'];
+const ADVANCED_GROUP_ORDER = ['Memory', 'Answer quality', 'Search', 'Lecture & diagrams', 'Screen & vision', 'Provider performance'];
 
 // Single source of truth for what the master "Smart features" switch controls: every
 // core-tier flag. Derived from FLAG_META so it can't drift.

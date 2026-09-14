@@ -775,7 +775,17 @@ export class IntelligenceEngine extends EventEmitter {
         ) return;
 
         if (this.speculativeTimer !== null) {
-            clearTimeout(this.speculativeTimer);
+            // Non-null assertion (not just the `!== null` guard above): this
+            // function is permanently unreachable (unconditional `return;` at
+            // the top, kept parked rather than deleted — see the block
+            // comment above). TS7's flow-narrowing does not appear to apply
+            // inside code it has already proven unreachable (identical
+            // `!== null` guards at the REACHABLE call sites below, e.g. the
+            // one a few lines down in the still-live code path, narrow fine
+            // without needing this). The `!` sidesteps that by stripping
+            // `null` from the static type directly instead of relying on
+            // flow analysis.
+            clearTimeout(this.speculativeTimer!);
         }
 
         this.speculativeTimer = setTimeout(() => {
@@ -1098,7 +1108,14 @@ export class IntelligenceEngine extends EventEmitter {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
         try {
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined);
+            // screenContext: docs/specs/live-screen-context-spec.md — resolved
+            // by AppState.resolveLiveScreenContextForAnswer() before dispatch
+            // (main.ts's `dispatch` callback), undefined when the flag is off
+            // or nothing usable is cached (tier 4 of that policy), in which
+            // case this is byte-identical to today's existing behavior.
+            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, {
+                screenContext: trigger.screenContext,
+            });
         } finally {
             this.nextRunIsAutomatic = false;
             if (fastAuto && !previousFastMode) {
@@ -1330,7 +1347,7 @@ export class IntelligenceEngine extends EventEmitter {
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
-    }, options: { reuseSpeculative: boolean; context: string }): Promise<void> {
+    }, options: { reuseSpeculative: boolean; context: string; screenContext?: any }): Promise<void> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -1343,6 +1360,7 @@ export class IntelligenceEngine extends EventEmitter {
             endpointSource: question.endpointSource,
             candidateGeneration: question.candidateGeneration,
             reuseSpeculative: options.reuseSpeculative,
+            screenContext: options.screenContext,
         });
     }
 
@@ -3609,6 +3627,34 @@ export class IntelligenceEngine extends EventEmitter {
                     const { buildV3Prompt } = require('./context-intelligence/orchestration/engine-bridge');
                     const _ctx = this.v3ModeRetrievalContext();
                     if (!_ctx) return undefined;
+                    // Skill auto-triggering, wired to the LIVE surface (2026-09-14).
+                    // This previously existed only on the manual-chat IPC handler
+                    // (ipcHandlers.ts ~1268) — a skill written to help during a live
+                    // interview (e.g. a DSA-answer-formatting skill) never fired
+                    // during an actual auto-answered turn, only if the user typed
+                    // the trigger phrase into the chat box by hand. Same matcher,
+                    // same "quoted phrase, verbatim substring, no LLM call" contract
+                    // as the manual surface (docs/skills/SKILL_AUTHORING.md) — this
+                    // adds zero latency of its own (SkillsManager.listSkills() is
+                    // now an in-memory read; see SkillsManager's skillsCache) and
+                    // matchSkillForMessage is a plain string scan.
+                    let _skillPromptBlock = '';
+                    try {
+                        const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+                        const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
+                        const enabledSkills = SkillsManager.getInstance().listSkills().filter((s: any) => s.enabled !== false);
+                        const questionText = String(wtaTurnQuestion || '');
+                        const autoMatch = questionText ? matchSkillForMessage(questionText, enabledSkills) : null;
+                        if (autoMatch) {
+                            const autoSkill = SkillsManager.getInstance().getSkill(autoMatch.skillId);
+                            if (autoSkill) {
+                                _skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(autoSkill);
+                                console.log(`[IntelligenceEngine] Skill auto-triggered on live turn: ${autoSkill.id} (matched "${autoMatch.matchedPhrase}")`);
+                            }
+                        }
+                    } catch (skillErr: any) {
+                        console.warn('[IntelligenceEngine] Automatic skill matching failed on WTA V3 turn, proceeding without:', skillErr?.message || skillErr);
+                    }
                     const _v3 = await buildV3Prompt({
                         surface: 'what-to-answer',
                         // The chat-history rollback must reach THIS surface too.
@@ -3890,7 +3936,13 @@ export class IntelligenceEngine extends EventEmitter {
                         console.log(`[IntelligenceEngine] WTA V3 prompt in effect: answerability=${_v3.answerability} evidence=${_v3.evidenceCount} fallback=${_v3.fallbackUsed}`);
                     }
                     return _v3 ? {
-                        system: _v3.system, user: _v3.user,
+                        // Same append convention as the manual-chat call site
+                        // (ipcHandlers.ts ~1746): appended after composition
+                        // rather than threaded through personaBase, so a skill
+                        // can layer guidance on top of whatever contract
+                        // (coding, what_to_say, etc.) the turn already composed.
+                        system: _skillPromptBlock ? `${_v3.system}\n\n## ACTIVE SKILL\n${_skillPromptBlock}` : _v3.system,
+                        user: _v3.user,
                         // T4: the evidence this prompt was composed from. The
                         // post-stream doc-grounded validator uses THIS rather
                         // than a fresh legacy retrieval — see the validator's

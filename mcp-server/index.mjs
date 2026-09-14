@@ -117,6 +117,12 @@ const db = openDb();
 // app's own Settings > Skills panel. Keep in sync with that file.
 const BUILTIN_SKILL_IDS = new Set(['humanize-text', 'humanize-ai-text']);
 const MAX_SKILL_FILE_BYTES = 100 * 1024;
+// Mirrors SkillsManager.ts's MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT — the
+// file can be up to MAX_SKILL_FILE_BYTES, but only this much of `instructions`
+// is actually injected into a live prompt when the skill fires (the rest is
+// silently truncated at answer time). Warn here so an author sees it at
+// creation time instead of discovering the truncation later.
+const MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT = 6000;
 
 function slugify(value) {
     return String(value || '')
@@ -163,11 +169,11 @@ const server = new McpServer({ name: 'natively-interview-knowledge', version: '1
 
 server.tool(
     'create_skill',
-    'Create a new Natively Skill — reusable instructions the agent applies automatically when a live question matches a trigger phrase. IMPORTANT: for automatic triggering to work, `description` MUST include the literal trigger wording in double quotes, e.g. \'Use when the user asks to "review this code" or "check my PR"\' — see docs/skills/SKILL_AUTHORING.md for the full guide and examples. A description with no quoted phrases means the skill will never fire automatically (manual-only, which this app no longer has a UI for) — always include at least one quoted trigger phrase unless the skill is intentionally inert.',
+    'Create a new Natively Skill — a Q&A answer template: when a question of a given kind comes up live (typed or spoken and auto-answered), answer it a given way. The topic is unrestricted — coding, behavioral, sales, system design, literally anything — what makes it a Skill is that trigger-plus-template shape, not the subject matter. IMPORTANT: for automatic triggering to work, `description` MUST include the literal trigger wording in double quotes, e.g. \'Use when the user asks to "review this code" or "check my PR"\' — see docs/skills/SKILL_AUTHORING.md for the full guide and examples. A description with no quoted phrases means the skill will never fire automatically (manual-only, which this app no longer has a UI for) — always include at least one quoted trigger phrase unless the skill is intentionally inert.',
     {
         name: z.string().min(1).describe('Human-readable skill name, e.g. "Code Review Checklist"'),
-        description: z.string().min(1).describe('What the skill does AND when to trigger it. MUST include at least one double-quoted literal trigger phrase for automatic matching to work, e.g. \'Use when the user asks to "review this code"\'.'),
-        instructions: z.string().min(1).describe('The actual instructions the agent follows once triggered — written as directives, e.g. "Check for: 1. ... 2. ..."'),
+        description: z.string().min(1).describe('What KIND of question this answers AND when to trigger it. MUST include at least one double-quoted literal trigger phrase for automatic matching to work, e.g. \'Use when the user asks to "review this code"\'.'),
+        instructions: z.string().min(1).describe('The answer template the agent follows once triggered — the concrete shape the answer should take for this question type, written as directives, e.g. "1. State the approach first. 2. Give complexity. 3. Then code."'),
         overwrite: z.boolean().optional().describe('Overwrite an existing skill with the same id. Default false (refuses if one already exists).'),
     },
     async ({ name, description, instructions, overwrite }) => {
@@ -188,9 +194,14 @@ server.tool(
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(skillPath, markdown, 'utf8');
         const quotedPhraseCount = (description.match(/"[^"]{2,60}"/g) || []).length;
-        const warning = quotedPhraseCount === 0
-            ? '\n\nWARNING: description has no double-quoted trigger phrase — this skill will never fire automatically. Consider revising the description or calling create_skill again with overwrite:true.'
-            : '';
+        const warnings = [];
+        if (quotedPhraseCount === 0) {
+            warnings.push('description has no double-quoted trigger phrase — this skill will never fire automatically. Consider revising the description or calling create_skill again with overwrite:true.');
+        }
+        if (instructions.length > MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT) {
+            warnings.push(`instructions are ${instructions.length} chars, over the ${MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT}-char live-prompt cap — only the first ${MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT} chars will actually be sent when this skill fires (the rest is truncated at answer time, to protect live-turn latency). A Skill is meant to be a short answer template, not a document — trim it with overwrite:true.`);
+        }
+        const warning = warnings.length ? `\n\nWARNING: ${warnings.join('\n\nWARNING: ')}` : '';
         return { content: [{ type: 'text', text: `Created skill "${name}" (id: ${id}) at ${skillPath}.${warning}` }] };
     },
 );

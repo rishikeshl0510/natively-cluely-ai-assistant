@@ -669,6 +669,8 @@ export interface ElectronAPI {
    *  before the first token arrives — lets the UI show it's working during
    *  the judge+retrieval+TTFT gap instead of looking idle. */
   onIntelligenceAutoAnswerStarted: (callback: () => void) => () => void
+  // docs/specs/live-screen-context-spec.md — pushed when the background screen-description refresh completes.
+  onLiveScreenContextUpdated: (callback: (data: { summary: string; capturedAt: number }) => void) => () => void
   // Verified code execution (background): ✓ badge + corrected message.
   onIntelligenceCodeVerified: (callback: (data: { question: string; passed: number; total: number; language: string }) => void) => () => void
   onIntelligenceCodeCorrection: (callback: (data: { question: string; answer: string; note: string; reVerified: boolean }) => void) => () => void

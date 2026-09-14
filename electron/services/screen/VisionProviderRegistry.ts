@@ -80,6 +80,40 @@ export function buildVisionProviders(inputs: VisionProviderBuildInputs): VisionP
   return providers.filter(p => p !== null) as VisionProviderConfig[];
 }
 
+/**
+ * Gemini-only provider list (docs/specs/live-screen-context-spec.md). Used
+ * via `understand()`'s existing `providerPolicy.__providersOverride` escape
+ * hatch (`ScreenUnderstandingService.ts:263`, previously test-only) to pin
+ * the automatic background screen-description capture to Gemini specifically
+ * — the answering call it feeds is itself always a Gemini call
+ * (`WhatToAnswerLLM.ts`), so keeping the description generator on the same
+ * model family keeps the two calls consistent. Cascades flash-lite → flash →
+ * pro (cheapest/fastest first, same ordering rationale as
+ * `buildVisionProviders`) so a live capture still degrades gracefully if the
+ * lead Gemini rung is unavailable, rather than failing outright with other
+ * configured providers sitting unused.
+ *
+ * `private_vision` mode returns ONLY local providers, same as
+ * `buildVisionProviders` — Gemini is a cloud call and must never be reached
+ * in that mode regardless of what triggered this capture.
+ */
+export function buildGeminiOnlyVisionProviders(inputs: VisionProviderBuildInputs): VisionProviderConfig[] {
+  const credentials = CredentialsManager.getInstance();
+  const providers: VisionProviderConfig[] = [];
+
+  if (inputs.mode !== 'private_vision') {
+    providers.push(geminiFlashLite(credentials, inputs));
+    providers.push(geminiFlash(credentials, inputs));
+    providers.push(geminiPro(credentials, inputs));
+  } else {
+    providers.push(ollama(credentials, inputs));
+    providers.push(codex(credentials, inputs));
+    providers.push(custom(credentials, inputs));
+  }
+
+  return providers.filter(p => p !== null) as VisionProviderConfig[];
+}
+
 // ─── Provider builders ────────────────────────────────────────────────────
 
 function natively(creds: CredentialsManager, _inputs: VisionProviderBuildInputs): VisionProviderConfig {

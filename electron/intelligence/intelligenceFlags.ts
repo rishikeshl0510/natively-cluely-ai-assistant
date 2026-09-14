@@ -67,6 +67,7 @@ export type IntelligenceFlagKey =
   // Multi-turn chat history on the V3 (default) chat path. OFF reverts to the
   // pre-2026-08-29 behaviour: ONE turn, answer capped at 280 chars.
   | 'chatHistoryMultiTurn'
+  | 'liveScreenContextEnabled'     // docs/specs/live-screen-context-spec.md
   | 'lectureIntelligenceV2'        // Phase 14
   | 'diagramIntelligence'          // Phase 15
   | 'hindsightMemory'              // Phase 16 — long-term memory provider on at all
@@ -551,6 +552,11 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   // get, which is precisely the failure contracts/flag.ts's header records.
   // Off is a genuine rollback to the one-turn window, not a half state.
   chatHistoryMultiTurn: { env: 'NATIVELY_CHAT_HISTORY_MULTI_TURN', setting: 'chatHistoryMultiTurnEnabled', default: true },
+  // Background screen-description capture feeding Auto-Answer as text context
+  // (docs/specs/live-screen-context-spec.md). Opt-in, default OFF: touches
+  // screen capture automatically rather than only on a manual press, which is
+  // a real privacy-surface increase over today's on-demand-only behavior.
+  liveScreenContextEnabled: { env: 'NATIVELY_LIVE_SCREEN_CONTEXT', setting: 'liveScreenContextEnabled', default: false },
   lectureIntelligenceV2: { env: 'NATIVELY_LECTURE_INTELLIGENCE_V2', setting: 'lectureIntelligenceV2Enabled', default: false },
   diagramIntelligence: { env: 'NATIVELY_DIAGRAM_INTELLIGENCE', setting: 'diagramIntelligenceEnabled', default: false },
   hindsightMemory: { env: 'NATIVELY_HINDSIGHT_MEMORY', setting: 'hindsightMemoryEnabled', default: false },
