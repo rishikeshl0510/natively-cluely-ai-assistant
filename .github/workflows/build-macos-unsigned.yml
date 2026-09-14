@@ -106,12 +106,21 @@ jobs:
       # 60-minute budget for 3 tries) — so instead, tolerate a dmg-only
       # failure: if zip + pkg came out, ship those and just warn that dmg is
       # missing rather than failing the whole build over one flaky target.
+      # --publish never: electron-builder auto-detects a CI environment and
+      # otherwise tries to IMPLICITLY publish the build to a GitHub Release,
+      # which fails hard without a GH_TOKEN ("GitHub Personal Access Token is
+      # not set") — this workflow has no such secret (and shouldn't need
+      # one; it uploads via actions/upload-artifact instead). Confirmed on a
+      # real run: every target (dmg/zip/pkg, both arches) built successfully
+      # and ONLY the implicit publish step failed, wasting the whole ~15-
+      # minute packaging pass. release-macos.yml's signed build already does
+      # the same --publish never for the identical reason.
       - name: Package app (unsigned)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           set -uo pipefail
-          node scripts/package-app.js --mac dmg zip pkg
+          node scripts/package-app.js --mac dmg zip pkg --publish never
           status=$?
           if [ "$status" -ne 0 ]; then
             shopt -s nullglob
