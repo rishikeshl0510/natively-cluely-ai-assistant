@@ -468,7 +468,38 @@ const INITIAL_STATUS: RerankerStatus = {
     lastTest: null,
 };
 
-export const RerankerSettings: React.FC = () => {
+/**
+ * The panel split the way the combined Retrieval page needs it.
+ *
+ * `hero` is the Active Reranker card plus the hosted-fallback toggle, which
+ * answers "what happens when the hosted service fails" and is therefore a
+ * question about the ACTIVE choice. `panel` is everything you configure: the
+ * local model library, the hosted providers, extensions, candidate count and
+ * the privacy notice. Retrieval DISCARDS `header` — the combined page carries
+ * one header for both halves of retrieval rather than a heading per Active card.
+ *
+ * A render prop on ONE instance, not two mounts of a `section` prop: both
+ * halves read the same `status`, so a second instance would leave the hero
+ * card stale the moment a card below it changed the active reranker.
+ */
+export interface RerankerSettingsParts {
+    /** Heading + subtitle. Retrieval drops this for one combined header. */
+    header: React.ReactNode;
+    /** Active Reranker card + the hosted-fallback toggle. */
+    hero: React.ReactNode;
+    /** Local library, hosted providers, extensions, candidates, privacy note. */
+    panel: React.ReactNode;
+}
+
+interface RerankerSettingsProps {
+    /**
+     * Optional. Absent — the standalone Reranker panel and the dev harness —
+     * renders the original single-column layout, wrapper and styles included.
+     */
+    renderParts?: (parts: RerankerSettingsParts) => React.ReactNode;
+}
+
+export const RerankerSettings: React.FC<RerankerSettingsProps> = ({ renderParts }) => {
     const t = useT();
     const aipTheme = useResolvedTheme();
 
@@ -701,10 +732,12 @@ export const RerankerSettings: React.FC = () => {
         const parts: string[] = [];
 
         if (status.effective.kind === 'natively') {
-            // Says where the text goes and what it costs, because both are the
-            // questions this option raises: it is hosted like the BYOK ones, but
-            // billed against the plan the user already pays for.
-            parts.push(t('Hosted'), t('Document text is sent to Natively'), t('Uses your plan\u2019s Knowledge allowance'));
+            // Says where the text goes, the question this option raises. The
+            // billing half ("Uses your plan's Knowledge allowance") is NOT
+            // repeated here — the Natively provider card below already states
+            // it, and on the combined Retrieval page this line sits directly
+            // above that card.
+            parts.push(t('Hosted'), t('Document text is sent to Natively'));
             if (status.lastTest?.ok) parts.push(`${Math.round(status.lastTest.latencyMs)} ms ${t('last test')}`);
         } else if (status.effective.kind === 'openrouter') {
             parts.push(t('Hosted'), t('Document text is sent to OpenRouter'));
@@ -1106,15 +1139,19 @@ export const RerankerSettings: React.FC = () => {
         return `${names.slice(0, -1).join(', ')} ${t('or')} ${names[names.length - 1]}`;
     }, [hostedProviders, t]);
 
-    return (
-        <div className="aip-root space-y-5 pb-10" data-theme={aipTheme} data-settings-stagger>
-            <header className="space-y-1">
-                <h3 className="aip-title">{t('Reranker')}</h3>
-                <p className="aip-subtitle">
-                    {t('After Natively searches your documents, the reranker decides which passages actually answer the question. It is chosen separately from your embedding model and your AI model.')}
-                </p>
-            </header>
+    const header = (
+        <header className="space-y-1">
+            <h3 className="aip-title">{t('Reranker')}</h3>
+            <p className="aip-subtitle">
+                {t('After Natively searches your documents, the reranker decides which passages actually answer the question. It is chosen separately from your embedding model and your AI model.')}
+            </p>
+        </header>
+    );
 
+    /* Active Reranker and the hosted-fallback toggle. On the combined Retrieval
+       page this sits above the Embedding/Reranker switcher. */
+    const hero = (
+        <>
             {loadError && (
                 <div className="aip-card p-3 flex items-start gap-2" role="status">
                     <AlertCircle size={13} strokeWidth={1.75} className="shrink-0 mt-0.5" aria-hidden="true" />
@@ -1219,7 +1256,13 @@ export const RerankerSettings: React.FC = () => {
                     </p>
                 )}
             </div>
+        </>
+    );
 
+    /* Everything you configure. On the Retrieval page this is the body of the
+       Reranker sub-tab. */
+    const panel = (
+        <>
             {/* Provider Card 1: Unified Local Reranker & Model Library Card */}
             <div className="aip-card aip-provider space-y-3">
                 <div className="aip-provider-head">
@@ -1932,6 +1975,19 @@ export const RerankerSettings: React.FC = () => {
                 </p>
             </div>
 
+        </>
+    );
+
+    /* The caller that places the parts owns the wrapper and the style tag —
+       Retrieval mounts this alongside EmbeddingSettings, and two copies of
+       AIP_CSS in one subtree is a duplicate stylesheet, not a merge. */
+    if (renderParts) return <>{renderParts({ header, hero, panel })}</>;
+
+    return (
+        <div className="aip-root space-y-5 pb-10" data-theme={aipTheme} data-settings-stagger>
+            {header}
+            {hero}
+            {panel}
             <style>{AIP_CSS}</style>
         </div>
     );

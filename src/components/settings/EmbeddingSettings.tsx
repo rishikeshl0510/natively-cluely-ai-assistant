@@ -248,7 +248,41 @@ const EmbeddingModelSelect: React.FC<EmbeddingModelSelectProps> = ({
     );
 };
 
-export const EmbeddingSettings: React.FC<{ onNavigate?: (tab: string) => void }> = () => {
+/**
+ * The panel split into the two pieces the combined Retrieval page needs.
+ *
+ * `header` and `hero` are the identity of the setting; `panel` is the provider
+ * stack. Retrieval hoists `hero` above its Embedding/Reranker switcher, puts
+ * `panel` inside the Embedding sub-tab, and DISCARDS `header` — the combined
+ * page states what embeddings and reranking are once, in one header, instead
+ * of repeating a section heading above each Active card.
+ *
+ * Both halves read the SAME component state (`select()` writes the active
+ * model, and the hero card and the provider cards both render from it), which
+ * is why this is a render prop on one instance rather than two mounts of a
+ * `section` prop. Two instances would each hold their own `active`, and
+ * picking a model in a card would leave the hero card above it stale.
+ */
+export interface EmbeddingSettingsParts {
+    /** Heading + subtitle. Retrieval drops this for one combined header. */
+    header: React.ReactNode;
+    /** The Active Embedding Model card. */
+    hero: React.ReactNode;
+    /** The provider stack. */
+    panel: React.ReactNode;
+}
+
+interface EmbeddingSettingsProps {
+    onNavigate?: (tab: string) => void;
+    /**
+     * Optional. Absent — the standalone Embeddings panel and both dev
+     * harnesses — renders the original single-column layout, wrapper, styles
+     * and all. Present, the caller owns the wrapper and places the parts.
+     */
+    renderParts?: (parts: EmbeddingSettingsParts) => React.ReactNode;
+}
+
+export const EmbeddingSettings: React.FC<EmbeddingSettingsProps> = ({ renderParts }) => {
     const t = useT();
     const aipTheme = useResolvedTheme();
 
@@ -880,15 +914,20 @@ export const EmbeddingSettings: React.FC<{ onNavigate?: (tab: string) => void }>
         );
     };
 
-    return (
-        <div className="aip-root space-y-5 pb-10" data-theme={aipTheme} data-settings-stagger>
-            <header className="space-y-1">
-                <h3 className="aip-title">{t('Embeddings')}</h3>
-                <p className="aip-subtitle">
-                    {t('Pick the model that indexes your documents for retrieval. It is chosen separately from your AI model, and changing it re-indexes your project.')}
-                </p>
-            </header>
+    const header = (
+        <header className="space-y-1">
+            <h3 className="aip-title">{t('Embeddings')}</h3>
+            <p className="aip-subtitle">
+                {t('Pick the model that indexes your documents for retrieval. It is chosen separately from your AI model, and changing it re-indexes your project.')}
+            </p>
+        </header>
+    );
 
+    /* The Active Embedding Model card: the decision this panel exists to make.
+       On the combined Retrieval page it sits above the Embedding/Reranker
+       switcher, so it stays readable no matter which sub-tab is open. */
+    const hero = (
+        <>
             {/* Active Model Card — matches AI Providers Active Model card styling */}
             <div className="aip-card p-5">
                 <div className="flex items-center justify-between gap-4 flex-wrap sm:flex-nowrap">
@@ -961,27 +1000,41 @@ export const EmbeddingSettings: React.FC<{ onNavigate?: (tab: string) => void }>
                 )}
             </div>
 
-            {/* Provider Cards Stack */}
-            {!loaded ? (
-                <div
-                    className="aip-cq space-y-4"
-                    role="status"
-                    aria-label={t('Loading embedding providers')}
-                    data-stagger-skip
-                >
-                    <SkeletonProviderCard />
-                    <SkeletonProviderCard />
-                </div>
-            ) : cardProviders.length === 0 ? (
-                <div className="aip-card aip-card-dashed text-center py-8">
-                    <p className="text-xs aip-muted">{t('No configurable embedding providers were found.')}</p>
-                </div>
-            ) : (
-                <div className="aip-cq space-y-4">
-                    {cardProviders.map(renderProvider)}
-                </div>
-            )}
+        </>
+    );
 
+    /* The provider stack: where keys are entered and endpoints configured.
+       On the Retrieval page this is the body of the Embedding sub-tab. */
+    const panel = !loaded ? (
+        <div
+            className="aip-cq space-y-4"
+            role="status"
+            aria-label={t('Loading embedding providers')}
+            data-stagger-skip
+        >
+            <SkeletonProviderCard />
+            <SkeletonProviderCard />
+        </div>
+    ) : cardProviders.length === 0 ? (
+        <div className="aip-card aip-card-dashed text-center py-8">
+            <p className="text-xs aip-muted">{t('No configurable embedding providers were found.')}</p>
+        </div>
+    ) : (
+        <div className="aip-cq space-y-4">
+            {cardProviders.map(renderProvider)}
+        </div>
+    );
+
+    /* A caller that places the parts owns the `.aip-root` wrapper and the style
+       tag too — Retrieval mounts this component AND RerankerSettings, and two
+       copies of AIP_CSS in one subtree is a duplicate stylesheet, not a merge. */
+    if (renderParts) return <>{renderParts({ header, hero, panel })}</>;
+
+    return (
+        <div className="aip-root space-y-5 pb-10" data-theme={aipTheme} data-settings-stagger>
+            {header}
+            {hero}
+            {panel}
             <style>{AIP_CSS}</style>
         </div>
     );
