@@ -16,6 +16,7 @@ import type {
     SkillUploadPreview,
     UploadSkillOutcome,
 } from '../../types/electron';
+import { SettingsToggle } from './SettingsToggle';
 
 // Cap on the instructions preview length shown in the confirm card. The main
 // process may also truncate (DEFAULT_MAX_INSTRUCTIONS_PREVIEW=280), but the
@@ -80,6 +81,10 @@ export const SkillsSettings: React.FC = () => {
     // row can independently be "currently mutating" — without this,
     // double-clicking Delete fires two concurrent rmSyncs.
     const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+    // Per-skill in-flight tracking for the enable/disable toggle — same
+    // pattern as deletingIds, so a double-click can't fire two concurrent
+    // setSkillEnabled calls racing on the same row.
+    const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
     // Inline two-step confirmation state. Track the single row currently
     // waiting for a confirm/cancel rather than a per-row boolean — only one
     // row can ever be in confirm-mode at once (clicking another row's trash
@@ -376,6 +381,32 @@ export const SkillsSettings: React.FC = () => {
         }
     };
 
+    // Toggle a skill's enabled state. Optimistic — flips the row immediately,
+    // reconciles from the IPC result, and reverts + surfaces an error banner
+    // if the main process refused (e.g. skill not found).
+    const toggleSkillEnabled = async (skill: SkillSummary) => {
+        if (togglingIds.has(skill.id)) return;
+        if (typeof window.electronAPI?.skillsSetEnabled !== 'function') {
+            setStatus(BRIDGE_MISSING_MSG);
+            return;
+        }
+        const next = !skill.enabled;
+        markInFlight(setTogglingIds, skill.id, true);
+        setSkills((prev) => prev.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)));
+        try {
+            const result = await window.electronAPI.skillsSetEnabled(skill.id, next);
+            if (!result?.success) {
+                setSkills((prev) => prev.map((s) => (s.id === skill.id ? { ...s, enabled: !next } : s)));
+                setStatus(result?.error || 'Could not update skill.');
+            }
+        } catch (error: any) {
+            setSkills((prev) => prev.map((s) => (s.id === skill.id ? { ...s, enabled: !next } : s)));
+            setStatus(error?.message || 'Could not update skill.');
+        } finally {
+            markInFlight(setTogglingIds, skill.id, false);
+        }
+    };
+
     // Truncate the instructions preview to RENDER_PREVIEW_MAX chars + ellipsis.
     // Main process already does this at 280, but the renderer enforces a
     // tighter cap so the confirm card never wraps to 6+ lines.
@@ -388,7 +419,7 @@ export const SkillsSettings: React.FC = () => {
                 <div>
                     <h3 className="text-lg font-bold text-text-primary mb-1">{t('Skills')}</h3>
                     <p className="text-xs text-text-secondary">
-                        {t('Local SKILL.md instructions. Invoke a skill in the overlay chat by typing /skill-name or $skill-name at the start of your message.')}
+                        {t('Local SKILL.md instructions. Enabled skills apply themselves automatically when your message matches a trigger phrase the skill defines — no typing a command. Turn a skill off here if it keeps firing when you don\'t want it to.')}
                     </p>
                 </div>
                 <button
@@ -591,16 +622,21 @@ export const SkillsSettings: React.FC = () => {
                                         /{skill.id}
                                     </span>
                                 </div>
-                                {/* Right side: delete affordance only (no badge).
-                                    Built-ins render nothing here; user-installed
-                                    skills render the trash icon (hover-reveal
-                                    via the MeetingDetails.tsx:696 idiom) or the
-                                    inline 2-step confirm after first click. The
-                                    delete affordance itself does NOT need a
-                                    fixed-width wrapper anymore — the natural
-                                    button width is stable and there's no badge
-                                    to anchor to. */}
-                                <div className="flex items-center gap-1 shrink-0">
+                                {/* Right side: enable/disable toggle (every
+                                    skill, including built-ins — disabling
+                                    never deletes the SKILL.md, so it's safe
+                                    for built-ins too) + delete affordance
+                                    (user-installed only). Built-ins render no
+                                    delete button because SkillsManager would
+                                    refuse the call; the toggle is the only
+                                    per-skill control they get. */}
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <SettingsToggle
+                                        checked={skill.enabled !== false}
+                                        onChange={() => toggleSkillEnabled(skill)}
+                                        label={t('Enable {name}').replace('{name}', skill.name)}
+                                        disabled={togglingIds.has(skill.id)}
+                                    />
                                     {skill.source !== 'builtin' && (
                                         confirmingId === skill.id ? (
                                             <div

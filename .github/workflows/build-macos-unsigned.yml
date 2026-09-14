@@ -1,0 +1,106 @@
+name: Build macOS (unsigned, fork-safe)
+
+# Produces an UNSIGNED, unnotarized macOS build (dmg + zip, arm64 + x64).
+#
+# Fork-safe by design: the private `premium` submodule
+# (Natively-AI-assistant/natively-premium) is never fetched — a personal fork
+# has no credential for it. Instead this uses the same NATIVELY_CORE_SMOKE=1
+# build path that `npm start` (app:dev:core-smoke) uses by default for every
+# contributor without premium access: scripts/build-electron.js externals the
+# premium require() calls at bundle time instead of trying to resolve them.
+# Everything except premium-only features (e.g. company research) works.
+#
+# This does NOT sign or notarize — see release-macos.yml for the
+# Developer-ID-signed + notarized release build, which needs Apple developer
+# certificates this workflow deliberately avoids requiring.
+#
+# Gatekeeper blocks an unsigned .app/.dmg by default on a fresh Mac. To run
+# the downloaded build locally: right-click the app -> Open (first launch
+# only), or from Terminal: xattr -cr /path/to/Natively.app
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-unsigned:
+    runs-on: macos-14 # Apple Silicon runner; builds both arches via NATIVELY_BUILD_ALL_MAC_ARCHES
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Deliberately NOT submodules:true — this build needs neither the
+        # private `premium` nor `natively-api` gitlinks (see header comment).
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Rust (native module)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      # Caches ~/.cargo/registry + native-module/target, keyed on Cargo.lock.
+      # The native module (cpal, cidre/ScreenCaptureKit, objc2, rubato, webrtc-vad,
+      # reqwest, ...) is the slowest part of this workflow from a cold cache —
+      # this turns every run after the first into an incremental Rust build
+      # instead of a from-scratch one.
+      - name: Cache Rust build (native-module)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native-module -> target
+          # Both arches build from the SAME target dir across two separate
+          # `napi build --target` invocations inside build-native.js — key on
+          # the job name only, not per-arch, so the second arch's build
+          # benefits from the first arch's already-compiled shared deps.
+          shared-key: native-module-macos
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Typecheck Electron main process
+        run: npm run typecheck:electron
+
+      - name: Build Electron main process (fork-safe, no premium)
+        run: npm run build:electron:core-smoke
+
+      - name: Build native module (both mac architectures)
+        run: NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native
+
+      - name: Ensure native asset deps
+        run: |
+          node scripts/ensure-sharp-mac-deps.js
+          node scripts/ensure-napi-canvas-mac-deps.js
+          node scripts/ensure-sqlite-vec.js
+
+      - name: Verify packaged local fallback assets (source mode)
+        run: npm run verify:packaged-local-assets
+
+      # package.json's default (unsigned) "build.mac" config already sets
+      # identity: null + hardenedRuntime: false; CSC_IDENTITY_AUTO_DISCOVERY=false
+      # is belt-and-braces so electron-builder never even probes for a local
+      # signing identity (there is none on this runner anyway).
+      - name: Package app (unsigned)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: node scripts/package-app.js --mac
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: natively-macos-unsigned
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error

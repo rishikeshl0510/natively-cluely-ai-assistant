@@ -1253,73 +1253,32 @@ export function initializeIpcHandlers(appState: AppState): void {
         myController = new AbortController();
         _chatStreamsBySender.set(senderId, { streamId: myStreamId, controller: myController });
 
-        // Skill invocation parsed EARLY (PR #429 Bug 003). It used to live ~35k
-        // characters below, after the Context Intelligence V3 short-circuit had
-        // already returned — so under V3 (default ON since 2026-07-30) the
-        // `/skill-name` prefix reached the model as literal text and the skill
-        // instructions were never injected anywhere.
-        //
-        // Only the PARSE moved. `message` itself is still mutated at the original
-        // boundary below, so every existing reader in between is untouched.
-        let skillStrippedMessage: string | null = null;
-        // Skill invocation: /skill-name or $skill-name prefix (issue #303).
-        // Strip the prefix from message before planAnswer so routing sees the
-        // bare user query, then inject the skill's instructions into context
-        // right before streamChat so the model follows them for this turn only.
+        // Skill invocation is fully AUTOMATIC — there is no manual /skill-name
+        // or $skill-name trigger and no skill-picker UI. `skillStrippedMessage`
+        // stays null forever now (its two downstream readers fall back to the
+        // literal `message`, which is correct: there is no "stripped query"
+        // concept left to apply). Kept as a variable rather than deleted so
+        // those two read sites don't need to change.
+        const skillStrippedMessage: string | null = null;
+        // Fires only when an ENABLED skill's description contains a quoted
+        // trigger phrase (see docs/skills/SKILL_AUTHORING.md) that appears
+        // verbatim in the message — no LLM call, no fuzzy scoring, so a skill
+        // cannot silently misfire on unrelated content. A skill written
+        // without quoted trigger phrases never auto-fires.
         let skillPromptBlock = '';
-        const skillPrefixMatch = typeof message === 'string'
-          ? message.match(/^[/$]([A-Za-z0-9_-]+)\s*(.*)$/s)
-          : null;
-        // Defensive: strip any embedded <answer_contract>...</answer_contract>
-        // block from the user-visible message. See stripEmbeddedAnswerContract
-        // for the contract-block leak rationale (grounding campaign H4, 2026-07-18).
-        // MEDIUM #2: placed at the planAnswer boundary so upstream routing
-        // (skill dispatch, identity probe, source-switch resolution) sees the
-        // user's literal input — error logs and unmatched-skill fallbacks
-        // report the original message, not a stripped variant.
-        if (skillPrefixMatch) {
-          try {
-            const candidateId = skillPrefixMatch[1];
-            const skill = SkillsManager.getInstance().getSkill(candidateId);
-            if (skill) {
-              // Disabled skills still resolve by name but must NOT inject their
-              // instructions into the prompt — the user turned them off in
-              // Settings → Skills. Surface a clear error rather than silently
-              // proceeding (which would invoke the skill anyway).
-              if (skill.enabled === false) {
-                event.sender.send(
-                  'gemini-stream-error',
-                  `Skill "/${skill.id}" is disabled. Enable it in Settings → Skills.`,
-                  { streamId: myStreamId },
-                );
-                return null;  // sibling error paths return null; handler is typed `| null`
-              }
-              skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(skill);
-              const strippedQuery = skillPrefixMatch[2].trim();
-              // Parsed here, APPLIED later (see the deferred assignment at the
-              // original site). Mutating `message` now would change what every
-              // reader between here and there sees — the identity probe, the
-              // source-switch resolution and the error logs all expect the
-              // user's literal input.
-              skillStrippedMessage = strippedQuery || `Please help me with the ${skill.name} skill.`;
-              console.log(`[IPC] Skill activated: ${skill.id}`);
-            } else {
-              const allSkills = SkillsManager.getInstance().listSkills();
-              const available = allSkills.length
-                ? allSkills.map(s => `/${s.id}`).join(', ')
-                : 'none registered';
-              event.sender.send(
-                'gemini-stream-error',
-                `Skill "/${candidateId}" not found. Available: ${available}`,
-                { streamId: myStreamId },
-              );
-              return null;  // sibling error paths return null; handler is typed `| null`
+        try {
+          const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+          const enabledSkills = SkillsManager.getInstance().listSkills().filter((s: any) => s.enabled !== false);
+          const autoMatch = typeof message === 'string' ? matchSkillForMessage(message, enabledSkills) : null;
+          if (autoMatch) {
+            const autoSkill = SkillsManager.getInstance().getSkill(autoMatch.skillId);
+            if (autoSkill) {
+              skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(autoSkill);
+              console.log(`[IPC] Skill auto-triggered: ${autoSkill.id} (matched "${autoMatch.matchedPhrase}")`);
             }
-          } catch (skillErr: any) {
-            console.warn('[IPC] Skill lookup failed:', skillErr?.message || skillErr);
-            event.sender.send('gemini-stream-error', `Skill lookup failed: ${skillErr?.message || 'unknown error'}`, { streamId: myStreamId });
-            return null;  // sibling error paths return null; handler is typed `| null`
           }
+        } catch (autoSkillErr: any) {
+          console.warn('[IPC] Automatic skill matching failed, proceeding without:', autoSkillErr?.message || autoSkillErr);
         }
 
         // ── CONTEXT INTELLIGENCE V3 — wired manual-chat surface ──────────────
@@ -5754,7 +5713,16 @@ export function initializeIpcHandlers(appState: AppState): void {
             // the streamed answer was already valid, finalText is undefined and the
             // already-streamed tokens stand. streamId (audit finding #3) lets the
             // renderer ignore a stale done from a superseded stream.
-            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId });
+            // Interview Knowledge citations (docs/specs/oss-knowledge-rag-spec.md):
+            // set by LLMHelper right before this answer was generated, read here
+            // so the renderer can show which document(s) backed it. Null/absent
+            // when no Interview Knowledge docs were retrieved for this turn.
+            const ikCitations = llmHelper.getLastInterviewKnowledgeCitations?.();
+            event.sender.send('gemini-stream-done', {
+              ...(finalText ? { finalText } : {}),
+              ...(ikCitations && ikCitations.length ? { citations: ikCitations } : {}),
+              streamId: myStreamId,
+            });
             chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
             chatTrace.finish({ chars: fullResponse.length });
             iTrace.setProvider({ provider: 'llm', model: undefined })
@@ -15363,6 +15331,152 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // ── Interview Knowledge (free-tier RAG, docs/specs/oss-knowledge-rag-spec.md) ──
+  // Deliberately separate from Modes reference files above: NONE of these
+  // handlers call isProOrTrialActive() — that is the whole point of this
+  // feature (see the spec's "Why this exists" section). A grep-test
+  // (electron/services/interviewKnowledge/__tests__/InterviewKnowledgeIpcFree.test.mjs)
+  // asserts none of them ever gain that call, so this stays honestly free on
+  // every future edit, not just today.
+
+  safeHandle('knowledge-doc:add-text', async (_, params: { title: string; content: string; collectionId?: string | null; docType?: string }) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      const doc = InterviewKnowledgeRetriever.getInstance().addText({ title: params?.title, content: params?.content, source: 'paste', collectionId: params?.collectionId, docType: params?.docType as any });
+      return { success: true, doc };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:add-text error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-doc:add-file', async (_, params?: { collectionId?: string | null; docType?: string }) => {
+    try {
+      const result: any = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'Text & Documents', extensions: ['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'xml', 'html', 'htm', 'log', 'pdf', 'docx'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { success: false, cancelled: true };
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      const doc = await InterviewKnowledgeRetriever.getInstance().addFile(result.filePaths[0], params?.collectionId, params?.docType as any);
+      return { success: true, doc };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:add-file error:', e);
+      return { success: false, error: 'Could not parse the selected file. It may be corrupt, password-protected, unsupported, or too large.' };
+    }
+  });
+
+  safeHandle('knowledge-doc:add-folder', async (_, params?: { collectionId?: string | null }) => {
+    try {
+      const result: any = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+      if (result.canceled || !result.filePaths?.[0]) return { success: false, cancelled: true };
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      const ingestResult = await InterviewKnowledgeRetriever.getInstance().addFolder(result.filePaths[0], params?.collectionId);
+      return { success: true, ...ingestResult };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:add-folder error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-doc:list', async (_, collectionId?: string | null) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      return { success: true, docs: InterviewKnowledgeRetriever.getInstance().list(collectionId) };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:list error:', e);
+      return { success: false, docs: [], error: e?.message || String(e) };
+    }
+  });
+
+  // ── Interview Knowledge collections (companies/interviews) — same free-tier guarantee as knowledge-doc:* above ──
+  safeHandle('knowledge-collection:create', async (_, params: { name: string; interviewerName?: string; contextNotes?: string }) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      return { success: true, collection: InterviewKnowledgeRetriever.getInstance().createCollection(params) };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:create error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-collection:list', async () => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      return { success: true, collections: InterviewKnowledgeRetriever.getInstance().listCollections() };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:list error:', e);
+      return { success: false, collections: [], error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-collection:update', async (_, id: string, updates: { name?: string; interviewerName?: string | null; contextNotes?: string | null }) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      InterviewKnowledgeRetriever.getInstance().updateCollection(id, updates);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:update error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-collection:delete', async (_, id: string) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      InterviewKnowledgeRetriever.getInstance().deleteCollection(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:delete error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-collection:get-active', async () => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      return { success: true, activeCollectionId: InterviewKnowledgeRetriever.getInstance().getActiveCollectionId() };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:get-active error:', e);
+      return { success: false, activeCollectionId: null, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-collection:set-active', async (_, id: string | null) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      InterviewKnowledgeRetriever.getInstance().setActiveCollectionId(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-collection:set-active error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-doc:delete', async (_, id: string) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      InterviewKnowledgeRetriever.getInstance().delete(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:delete error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  safeHandle('knowledge-doc:get-status', async (_, id: string) => {
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      return { success: true, ...InterviewKnowledgeRetriever.getInstance().getStatus(id) };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:get-status error:', e);
+      return { success: false, status: 'pending', chunkCount: 0, error: e?.message || String(e) };
+    }
+  });
+
   // ── OKF Knowledge Packs (Phase 5 UI) ────────────────────────────
   // All handlers are no-ops (empty result) when okfKnowledgeUi is off, so
   // the renderer can safely call them unconditionally — the UI itself is
@@ -15885,13 +15999,22 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  // NOTE: skills:set-enabled IPC was removed. SkillsManager.setSkillEnabled()
-  // remains as a defense-in-depth gate in case future code paths want to
-  // disable skills without going through delete (e.g., a per-mode default
-  // skill concept, a "never invoke during sensitive flows" toggle, etc.). The
-  // skillPromptBlock injection site at line ~930 still consults skill.enabled
-  // before calling buildPromptBlock(), so any caller that flips it via a
-  // direct SkillsManager call gets the gate for free.
+  // Re-added: now that skill triggering is fully automatic (no more
+  // /skill-name prefix), "disable without deleting" is meaningful again — a
+  // user can keep a skill installed but stop it from auto-firing (e.g. it
+  // keeps matching on unrelated messages) without losing the SKILL.md file.
+  // matchSkillForMessage() (electron/services/skills/skillMatcher.ts) and the
+  // explicit-invocation path both filter on skill.enabled before ever
+  // calling buildPromptBlock(), so this toggle takes effect immediately —
+  // no cache to invalidate, listSkills() reads disk state fresh every call.
+  safeHandle('skills:set-enabled', async (_evt, id: string, enabled: boolean) => {
+    try {
+      return SkillsManager.getInstance().setSkillEnabled(id, enabled);
+    } catch (e: any) {
+      console.warn('[IPC] skills:set-enabled error:', e?.message || e);
+      return { success: false, error: e?.message || 'failed to update skill' };
+    }
+  });
 
   // Step 3 of the Skill Upload feature — validate (and optionally install)
   // an uploaded skill payload. Errors are NEVER thrown across the IPC
@@ -16000,6 +16123,15 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
       console.error('[IPC] phone-mirror:set-lan error:', e);
       return { error: e?.message || 'failed to update lan setting' };
+    }
+  });
+
+  safeHandle('phone-mirror:set-answers-only', async (_, answersOnly: boolean) => {
+    try {
+      return await PhoneMirrorService.getInstance().setAnswersOnly(!!answersOnly);
+    } catch (e: any) {
+      console.error('[IPC] phone-mirror:set-answers-only error:', e);
+      return { error: e?.message || 'failed to update answers-only setting' };
     }
   });
 

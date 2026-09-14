@@ -19,6 +19,14 @@ export interface NativeModule {
   // existing shipped binaries don't have it — main.ts checks `typeof` before
   // calling. Requires a binary rebuild (cargo build --release).
   getDefaultOutputDeviceId?: () => string;
+  // Windows-only: true when this session is itself an RDP connection, and/or
+  // is being shadowed/remote-controlled (`mstsc /shadow`). Backs
+  // RemoteSessionGuard's auto-hide-during-remote-viewing behavior — see
+  // native-module/src/remote_session_windows.rs for why content protection
+  // alone (WDA_EXCLUDEFROMCAPTURE) does not cover this case. Optional because
+  // existing shipped binaries don't have it and it's absent on non-Windows
+  // builds entirely; requires a binary rebuild.
+  getRemoteSessionState?: () => { isRemoteSession: boolean; isRemoteControlled: boolean };
   // macOS-only: apply NSPanel-nonactivating + becomesKeyOnlyIfNeeded +
   // hidesOnDeactivate=NO + the right collectionBehavior on the overlay
   // window so clicks/keystrokes don't activate Natively (foreground app

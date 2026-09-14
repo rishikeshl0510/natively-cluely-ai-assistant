@@ -400,14 +400,13 @@ test('preload exposes skillsDelete on window.electronAPI', () => {
   assert.ok(preload.indexOf('skillsDelete:', exposeIdx) > exposeIdx,
     'skillsDelete must live inside the electronAPI contextBridge block');
 
-  // Negative assertion: skillsSetEnabled / onSkillsChanged IPC plumbing was
-  // intentionally removed. If a future contributor re-adds the toggle UI they
-  // will need to wire these back up — this assertion catches a "subtle leak"
-  // where one half returns without the other.
-  assert.doesNotMatch(preload, /skillsSetEnabled:/,
-    'skillsSetEnabled bridge was intentionally removed; re-add only with the toggle UI');
-  assert.doesNotMatch(preload, /onSkillsChanged:/,
-    'onSkillsChanged broadcast bridge was intentionally removed; re-add only with the toggle UI');
+  // skillsSetEnabled was re-added: skill triggering is now fully automatic
+  // (no /skill-name prefix), which makes "disable without deleting" a real,
+  // reachable feature again — a user can keep a skill's SKILL.md installed
+  // but stop it from auto-firing.
+  assert.match(preload,
+    /skillsSetEnabled:\s*\(\s*id:\s*string,\s*enabled:\s*boolean\s*\)\s*=>\s*ipcRenderer\.invoke\(\s*['"]skills:set-enabled['"]/,
+    'skillsSetEnabled must be an ipcRenderer.invoke wrapper around skills:set-enabled');
 });
 
 test('electron.d.ts declares enabled on SkillSummary and the skillsDelete bridge method', () => {
@@ -424,9 +423,10 @@ test('electron.d.ts declares enabled on SkillSummary and the skillsDelete bridge
   assert.match(types,
     /skillsDelete:\s*\(\s*id:\s*string\s*\)\s*=>\s*Promise<\{\s*success:\s*boolean;\s*error\?:\s*string\s*\}>/);
 
-  // Negative assertion — skillsSetEnabled type was removed.
-  assert.doesNotMatch(types, /skillsSetEnabled:/,
-    'skillsSetEnabled type was intentionally removed; re-add only with the toggle UI');
+  // Re-added alongside the enable/disable toggle.
+  assert.match(types,
+    /skillsSetEnabled:\s*\(id:\s*string,\s*enabled:\s*boolean\)\s*=>\s*Promise<\{\s*success:\s*boolean;\s*error\?:\s*string\s*\}>/,
+    'SkillSummary bridge must declare skillsSetEnabled');
 });
 
 test('SkillsSettings renderer guards the skillsDelete bridge and renders delete UI', () => {
@@ -438,10 +438,10 @@ test('SkillsSettings renderer guards the skillsDelete bridge and renders delete 
     /typeof window\.electronAPI\?\.skillsDelete\s*!==\s*['"]function['"]/,
     'SkillsSettings must guard against a missing skillsDelete bridge');
 
-  // Negative assertion — skillsSetEnabled bridge was removed with the toggle.
-  assert.doesNotMatch(view,
-    /typeof window\.electronAPI\?\.skillsSetEnabled/,
-    'skillsSetEnabled bridge must not be referenced from the renderer (toggle UI removed)');
+  // Re-added: the enable/disable toggle guards its bridge the same way.
+  assert.match(view,
+    /typeof window\.electronAPI\?\.skillsSetEnabled\s*!==\s*['"]function['"]/,
+    'SkillsSettings must guard against a missing skillsSetEnabled bridge');
 
   // Unconditional call after guard.
   assert.match(view, /await window\.electronAPI\.skillsDelete\(/);
@@ -500,24 +500,20 @@ test('SkillsSettings renderer guards the skillsDelete bridge and renders delete 
     'delete button must be conditionally rendered (only for non-builtin skills)');
 });
 
-test('disabled-skill invocation gate in ipcHandlers.ts remains as defense-in-depth', () => {
+test('disabled skills are filtered out BEFORE automatic matching, so they can never auto-fire', () => {
   const source = read('electron/ipcHandlers.ts');
 
-  // Even though the toggle UI was removed, the server-side gate stays so
-  // future callers that flip skill.enabled via a direct SkillsManager call
-  // (a future per-mode default, an experimental "hide during sensitive flows"
-  // toggle, etc.) get the gate for free. The handler MUST check
-  // skill.enabled === false BEFORE calling buildPromptBlock().
+  // Skill triggering is now fully automatic (no /skill-name prefix, no
+  // explicit lookup to reject) — the gate moved earlier: a disabled skill is
+  // filtered out of the candidate list before matchSkillForMessage ever sees
+  // it, rather than being found-then-rejected.
   assert.match(source,
-    /skill\.enabled\s*===\s*false/,
-    'invocation gate must still check skill.enabled === false (defense-in-depth)');
-  assert.match(source,
-    /is disabled\.\s*Enable it in Settings/,
-    'must still surface a user-actionable "is disabled. Enable it in Settings" error');
-  const gateIdx = source.indexOf('skill.enabled === false');
-  const buildIdx = source.indexOf('buildPromptBlock(skill)');
-  assert.ok(gateIdx >= 0 && buildIdx > gateIdx,
-    'invocation gate must precede buildPromptBlock(skill) so a disabled skill cannot be injected');
+    /listSkills\(\)\.filter\(\([^)]*\)\s*=>\s*[^.]*\.enabled\s*!==\s*false\)/,
+    'enabled skills must be filtered via .enabled !== false before matching');
+  const filterIdx = source.search(/listSkills\(\)\.filter\(\([^)]*\)\s*=>\s*[^.]*\.enabled\s*!==\s*false\)/);
+  const matchIdx = source.indexOf('matchSkillForMessage(message, enabledSkills)');
+  assert.ok(filterIdx >= 0 && matchIdx > filterIdx,
+    'the enabled-only filter must run before matchSkillForMessage is called');
 });
 
 // ---------------------------------------------------------------------------

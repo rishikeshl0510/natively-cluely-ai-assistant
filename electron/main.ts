@@ -1216,6 +1216,7 @@ import { MicrophoneCapture } from "./audio/MicrophoneCapture"
 import { AudioDevices } from "./audio/AudioDevices"
 import { resolveRequestedInputDevice } from "./audio/audioDeviceSelection.mjs"
 import { loadNativeModule } from "./audio/nativeModuleLoader"
+import { RemoteSessionGuard, createChecker } from "./services/RemoteSessionGuard"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
@@ -1392,6 +1393,17 @@ export class AppState {
   // View management
   private view: "queue" | "solutions" = "queue"
   private isUndetectable: boolean = false
+  // Auto-hide while Undetectable Mode is on AND a real remote-viewing session
+  // (Windows RDP/shadow, macOS Screen Sharing) is detected — see
+  // electron/services/RemoteSessionGuard.ts for why content protection alone
+  // doesn't cover that case. Lazily created on first use (only while
+  // undetectable is ever turned on) rather than at startup, so a machine that
+  // never enables Undetectable Mode never spends a single poll tick on this.
+  private _remoteSessionGuard: RemoteSessionGuard | null = null
+  // True only while THIS guard is the reason the window is hidden, so the
+  // falling edge (remote session ends) knows to restore it — and does NOT
+  // fire if the user had already hidden the window themselves beforehand.
+  private _autoHiddenByRemoteSession = false
 
   private problemInfo: {
     problem_statement: string
@@ -1451,7 +1463,12 @@ export class AppState {
   // contextDebugLevel at 'verbose' forever — exactly the flattening of the
   // user's Intelligence-settings choice this exists to prevent.
   private _ambientChatEnabled: boolean = false;
-  private _autoAnswerEnabled: boolean = false;
+  // Default flipped true (2026-09, teleprompter rework): the live overlay's
+  // manual buttons (What to Answer/Clarify/Recap/Brainstorm/Follow-up) were
+  // removed entirely, so Auto-Answer is now the ONLY trigger that ever
+  // produces a live answer for a user who hasn't touched Settings. Leaving
+  // this false would make the overlay do nothing at all out of the box.
+  private _autoAnswerEnabled: boolean = true;
   // Tracks whether STT sample-rate has been applied for the current capture
   // session. Reset on every reconfigureAudio / new pipeline build so the next
   // first-chunk handler reads the freshly-detected native rate.
@@ -1511,7 +1528,10 @@ export class AppState {
     this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
     setVerboseLoggingFlag(this._verboseLogging);
     this._ambientChatEnabled = settingsManager.get('ambientChatEnabled') ?? false;
-    this._autoAnswerEnabled = settingsManager.get('autoAnswerEnabled') ?? false;
+    // Default true (2026-09, teleprompter rework) — see the field comment above.
+    // An explicit persisted `false` (a user who deliberately turned it off) is
+    // still honored; only an UNSET value falls through to the new default.
+    this._autoAnswerEnabled = settingsManager.get('autoAnswerEnabled') ?? true;
     console.log('[AutoAnswer] engine=simple (stoppage + judge)');
     console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}, verboseLogging=${this._verboseLogging}, ambientChatEnabled=${this._ambientChatEnabled}, autoAnswerEnabled=${this._autoAnswerEnabled}`);
 
@@ -1851,6 +1871,13 @@ export class AppState {
         } else if (actionId === 'general:selective-screenshot') {
           const mainWindow = this.getMainWindow();
           this.sendToWindow(mainWindow, 'global-shortcut', { action: 'selectiveScreenshot' });
+        } else if (actionId === 'general:toggle-expand') {
+          // Toggling the overlay body is renderer-owned React state
+          // (isExpanded in NativelyInterface.tsx) — same routing pattern as
+          // the screenshot actions above, since main cannot flip renderer
+          // state directly.
+          const mainWindow = this.getMainWindow();
+          this.sendToWindow(mainWindow, 'global-shortcut', { action: 'toggleExpand' });
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
           await this.captureScreenAndProcess();
@@ -2509,6 +2536,15 @@ export class AppState {
         ModesManager.getInstance().setSharedEmbeddingPipeline(modeEmbeddingPipeline);
         this.scheduleModeReferenceIndexRetry();
 
+        // Free-tier "Interview Knowledge" feature (docs/specs/oss-knowledge-rag-spec.md)
+        // reuses the SAME already-initialized pipeline for the same reason as
+        // ModesManager above — a fresh, never-initialized EmbeddingPipeline would
+        // silently degrade every knowledge-doc query to lexical-only forever.
+        {
+            const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+            InterviewKnowledgeRetriever.getInstance().setSharedEmbeddingPipeline(modeEmbeddingPipeline);
+        }
+
         // Context Intelligence V3: hand the engine LAZY access to the meeting
         // retriever. IntelligenceManager was constructed before this block, so a
         // provider closure is passed rather than the instance — it also means a
@@ -2689,6 +2725,30 @@ export class AppState {
             }
           })();
         }
+
+        // Same self-heal, for the free-tier "Interview Knowledge" docs
+        // (electron/services/interviewKnowledge/InterviewKnowledgeRetriever.ts
+        // — a deliberately separate feature from knowledgeOrchestrator above,
+        // see that file's header). ModeHybridRetriever.getFileIndexStatus
+        // already reports a file as 'pending' the instant the active
+        // embedding space no longer matches its stored vectors (e.g. after an
+        // embedding.mode/provider change in Settings), and ensureAllIndexed()
+        // re-embeds anything not 'ready' — but until now the only caller was
+        // LLMHelper.stream's per-turn retrieval, so a provider change left
+        // every doc stranded in the OLD space (silently returning zero
+        // retrieval results) until the user's FIRST live question paid for
+        // the full re-embed synchronously, inline in that turn's latency.
+        // Kicking it here — same pattern as the orchestrator kick above —
+        // does that migration in the background at startup instead.
+        (async () => {
+          try {
+            await self.ragManager?.getEmbeddingPipeline()?.waitForReady();
+            const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+            await InterviewKnowledgeRetriever.getInstance().ensureAllIndexed();
+          } catch (e: any) {
+            console.warn('[main] Interview Knowledge ensureAllIndexed kick failed (non-fatal):', e?.message || e);
+          }
+        })();
 
         // Phase 1: transcript-aware intent hint. The orchestrator (premium) has
         // no SessionTracker reference (package boundary), so the app layer reads
@@ -3236,6 +3296,16 @@ export class AppState {
       console.log(`[AutoAnswer:text] ${label}\n    “${text}”`);
     },
     dispatch: (question, { reuseSpeculative }) => {
+      // Renderer signal (2026-09, "still shows Waiting for a question" fix):
+      // the judge already approved this candidate and dispatch is starting —
+      // real work (retrieval + generation) begins here, but none of the
+      // token/token-batch handlers set isProcessing, so the UI showed the
+      // idle placeholder for the entire judge+retrieval+TTFT gap before the
+      // first token arrived. Fire-and-forget; the token stream itself still
+      // drives the actual content once it starts.
+      try {
+        this.sendToWindow(this.getMainWindow(), 'intelligence-auto-answer-started', {});
+      } catch { /* UI hint only — never block dispatch */ }
       return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
       });
@@ -3375,7 +3445,7 @@ export class AppState {
       const apiKey = CredentialsManager.getInstance().getElevenLabsApiKey();
       if (apiKey) {
         console.log(`[Main] Using ElevenLabsStreamingSTT for ${speaker}`);
-        stt = new ElevenLabsStreamingSTT(apiKey);
+        stt = new ElevenLabsStreamingSTT(apiKey, speaker);
       } else {
         console.warn(`[Main] No API key for ElevenLabs STT, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
@@ -6809,7 +6879,16 @@ export class AppState {
       // and mode switches, so a minutes-old answer appeared with no marker of
       // what it answered (the live "late CGPA answer" report). The renderer
       // uses this stamp to drop or visibly label stale finals.
-      this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now() })
+      // Interview Knowledge citations (docs/specs/oss-knowledge-rag-spec.md):
+      // set by LLMHelper right before this answer was generated. Auto-Answer
+      // is now the only live-answer trigger (manual chat removed), so this is
+      // the one place citations must reach the renderer for this intent —
+      // mirrors the manual-chat 'gemini-stream-done' citation spread exactly.
+      const ikCitationsAnswer = this.processingHelper?.getLLMHelper?.()?.getLastInterviewKnowledgeCitations?.();
+      this.sendToWindow(win, 'intelligence-suggested-answer', {
+        answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(),
+        ...(ikCitationsAnswer && ikCitationsAnswer.length ? { citations: ikCitationsAnswer } : {}),
+      })
 
     })
 
@@ -6871,6 +6950,11 @@ export class AppState {
     this.intelligenceManager.on('recap', (summary: string) => {
       flushBatchesBeforeFinal();
       const win = mainWindow()
+      // No Interview Knowledge citations here: runRecap() summarizes the
+      // transcript via a dedicated recapLLM that never calls
+      // InterviewKnowledgeRetriever, so lastInterviewKnowledgeCitations would
+      // only ever hold a STALE value from an unrelated prior answer turn —
+      // attaching it here would misattribute sources to this recap.
       this.sendToWindow(win, 'intelligence-recap', { summary })
     })
 
@@ -6882,6 +6966,9 @@ export class AppState {
     this.intelligenceManager.on('clarify', (clarification: string) => {
       flushBatchesBeforeFinal();
       const win = mainWindow()
+      // No Interview Knowledge citations: runClarify() uses a dedicated
+      // clarifyLLM with no retrieval step — see the 'recap' handler above
+      // for why attaching lastInterviewKnowledgeCitations here would be wrong.
       this.sendToWindow(win, 'intelligence-clarify', { clarification })
     })
 
@@ -6893,6 +6980,10 @@ export class AppState {
     this.intelligenceManager.on('follow_up_questions_update', (questions: string) => {
       flushBatchesBeforeFinal();
       const win = mainWindow()
+      // No Interview Knowledge citations: runFollowUpQuestions() uses a
+      // dedicated followUpQuestionsLLM with no retrieval step — see the
+      // 'recap' handler above for why lastInterviewKnowledgeCitations would
+      // be wrong to attach here.
       this.sendToWindow(win, 'intelligence-follow-up-questions-update', { questions })
     })
 
@@ -7565,6 +7656,24 @@ export class AppState {
     this.modelSelectorWindowHelper.setContentProtection(state)
     this.cropperWindowHelper.setContentProtection(state)
 
+    // Undetectable Mode's whole promise is "nobody can see this app" — but
+    // content protection above cannot make good on that promise over a real
+    // RDP/shadow (Windows) or Screen Sharing (macOS) session (see
+    // RemoteSessionGuard.ts). Close that gap only while undetectable is on:
+    // poll for an active remote-viewing session and hide/restore accordingly.
+    if (state) {
+      this.getRemoteSessionGuard().start();
+    } else {
+      this.getRemoteSessionGuard().stop();
+      // Turning undetectable OFF while we're mid-auto-hide should restore
+      // visibility rather than leave the window hidden with no guard left
+      // running to un-hide it later.
+      if (this._autoHiddenByRemoteSession) {
+        this._autoHiddenByRemoteSession = false;
+        this.windowHelper.showMainWindow(true);
+      }
+    }
+
     if (process.platform === 'win32') {
       this.windowHelper.syncOverlayInteractionPolicy();
       this.settingsWindowHelper.syncActivationPolicy();
@@ -7742,6 +7851,39 @@ export class AppState {
     this.cropperWindowHelper.reassertContentProtection();
   }
 
+  // Lazily construct the guard on first use (only reachable once Undetectable
+  // Mode has been turned on at least once this run) and wire its onChange
+  // handler exactly once. The native module may load AFTER AppState is
+  // constructed on some startup paths, so this is deferred to call time
+  // rather than done in the constructor.
+  private getRemoteSessionGuard(): RemoteSessionGuard {
+    if (this._remoteSessionGuard) return this._remoteSessionGuard;
+    const NativeModule: any = loadNativeModule();
+    const checker = createChecker(process.platform, NativeModule || {});
+    const guard = new RemoteSessionGuard(checker);
+    guard.onChange((active) => {
+      // Guard against a stray late callback after undetectable was already
+      // turned back off (stop() clears the interval but a poll already in
+      // flight can still resolve after) — only act while still undetectable.
+      if (!this.isUndetectable) return;
+      if (active) {
+        if (this.windowHelper.isVisible()) {
+          console.log('[RemoteSessionGuard] remote session detected while undetectable — hiding');
+          this.windowHelper.hideMainWindow();
+          this._autoHiddenByRemoteSession = true;
+        }
+      } else if (this._autoHiddenByRemoteSession) {
+        console.log('[RemoteSessionGuard] remote session ended — restoring');
+        this._autoHiddenByRemoteSession = false;
+        // inactive:true — restore without stealing OS focus from whatever
+        // the user is doing now, matching toggleMainWindow()'s own restore.
+        this.windowHelper.showMainWindow(true);
+      }
+    });
+    this._remoteSessionGuard = guard;
+    return guard;
+  }
+
   public getUndetectable(): boolean {
     return this.isUndetectable
   }
@@ -7765,6 +7907,13 @@ export class AppState {
     // can arrive later than the toggle path's 6-retry window. Extra isVisible()
     // re-checks are cheap and stop early via the isUndetectable guard.
     this.reassertUndetectableStealth(18);
+    // This path (persisted isUndetectable=true at launch) never calls
+    // setUndetectable() — this.isUndetectable was already set true reading
+    // settings in the constructor, so setUndetectable's own change-detection
+    // would see "no change" and skip its guard.start() entirely. Arm it here
+    // too so a session that launches already-undetectable gets the same
+    // remote-session auto-hide as one that toggles undetectable on mid-session.
+    this.getRemoteSessionGuard().start();
   }
 
   // Re-drive the app back to a fully-stealth state after any operation that can
@@ -9246,6 +9395,81 @@ if (process.env.THINKING_MATRIX === '1') {
     } catch (e: any) {
       logToFile(`[main] render-process-gone: reload failed: ${e?.message || e}`);
     }
+  });
+
+  // HANG RECOVERY (2026-09, explicit "nothing should crash the app... we
+  // need a way to restart automatically" request): render-process-gone above
+  // only fires when the renderer process actually DIES (crashed/killed). It
+  // never fires for the failure mode diagnosed earlier tonight — a window
+  // that stays alive but stops responding to input (confirmed live: an
+  // over-aggressive reveal-pacer rate cap could pin the render thread,
+  // window visible, clicks doing nothing, no crash event of any kind).
+  // Chromium's own hang detector reports exactly this via 'unresponsive' /
+  // 'responsive' on webContents — wiring it up here closes that gap using
+  // the SAME recovery mechanism (reloadIgnoringCache) and the SAME
+  // crash-loop budget (rendererReloadHistory/RENDERER_RELOAD_MAX) as the
+  // crash path above, so a window that hangs repeatedly still hits the same
+  // terminal give-up + user dialog instead of reloading forever.
+  const UNRESPONSIVE_GRACE_MS = 10_000; // give a real-but-slow task (e.g. a big render) a chance to clear on its own
+  const unresponsiveTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('unresponsive', () => {
+      const id = contents.id;
+      if (unresponsiveTimers.has(id)) return; // already waiting on this one
+      const urlNow = (() => { try { return contents.getURL?.() || ''; } catch { return ''; } })();
+      logToFile(`[main] webContents ${id} unresponsive (${urlNow || 'unknown url'}) — waiting ${UNRESPONSIVE_GRACE_MS}ms before recovering`);
+      const timer = setTimeout(() => {
+        unresponsiveTimers.delete(id);
+        if (contents.isDestroyed?.() || appState.isQuitting?.()) return;
+        // Same recoverable-window scope as render-process-gone: real
+        // user-facing surfaces only, never transient helpers that get
+        // recreated on next open anyway.
+        const isRecoverableWindow =
+          urlNow === '' ||
+          /[?&]window=(launcher|settings|overlay)\b/.test(urlNow) ||
+          !/[?&]window=/.test(urlNow);
+        if (!isRecoverableWindow) {
+          logToFile(`[main] webContents ${id} still unresponsive after grace period — not auto-reloading transient window (${urlNow})`);
+          return;
+        }
+        const now = Date.now();
+        const history = (rendererReloadHistory.get(id) || []).filter((t) => now - t < RENDERER_RELOAD_WINDOW_MS);
+        if (history.length >= RENDERER_RELOAD_MAX) {
+          rendererReloadHistory.delete(id);
+          logCrashConsole('webContents-hang-loop-giveup', { webContentsId: id, reloadsInWindow: history.length, windowMs: RENDERER_RELOAD_WINDOW_MS });
+          try {
+            const { dialog } = require('electron');
+            dialog.showErrorBox(
+              'Natively — display error',
+              'A window keeps freezing. Please restart Natively. If this continues, update to the latest version.'
+            );
+          } catch { /* dialog best-effort */ }
+          terminateAfterFatalError('webContents-hang-loop-giveup', 1);
+          return;
+        }
+        history.push(now);
+        rendererReloadHistory.set(id, history);
+        logToFile(`[main] webContents ${id} still unresponsive after ${UNRESPONSIVE_GRACE_MS}ms — auto-reloading (attempt ${history.length}/${RENDERER_RELOAD_MAX} within ${RENDERER_RELOAD_WINDOW_MS}ms)`);
+        try {
+          contents.reloadIgnoringCache();
+        } catch (e: any) {
+          logToFile(`[main] webContents ${id} hang-recovery reload failed: ${e?.message || e}`);
+        }
+      }, UNRESPONSIVE_GRACE_MS);
+      unresponsiveTimers.set(id, timer);
+    });
+    contents.on('responsive', () => {
+      const timer = unresponsiveTimers.get(contents.id);
+      if (timer) {
+        clearTimeout(timer);
+        unresponsiveTimers.delete(contents.id);
+        logToFile(`[main] webContents ${contents.id} became responsive again before the grace period ended — no action taken`);
+      }
+    });
+    contents.once('destroyed', () => {
+      const timer = unresponsiveTimers.get(contents.id);
+      if (timer) { clearTimeout(timer); unresponsiveTimers.delete(contents.id); }
+    });
   });
 
   app.on('child-process-gone', (_event, details) => {

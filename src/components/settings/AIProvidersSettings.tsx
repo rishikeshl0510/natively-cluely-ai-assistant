@@ -1838,9 +1838,13 @@ interface ModelSelectProps {
     onChange: (value: string) => void;
     placeholder?: string;
     className?: string;
+    /** Trigger button width utility class. Its own prop (not folded into
+     *  `className`) so a caller can shrink it without depending on Tailwind's
+     *  class-order precedence to beat the `w-40` default. */
+    widthClassName?: string;
 }
 
-const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder, className = "" }) => {
+const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder, className = "", widthClassName = "w-40" }) => {
     const t = useT();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = React.useRef<HTMLDivElement>(null);
@@ -1864,7 +1868,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
                 onClick={() => setIsOpen(!isOpen)}
                 aria-expanded={isOpen}
                 aria-haspopup="listbox"
-                className={`aip-select-trigger w-40 ${className}`}
+                className={`aip-select-trigger ${widthClassName} ${className}`}
                 type="button"
             >
                 <span className="truncate pr-2">{selectedOption ? selectedOption.name : resolvedPlaceholder}</span>
@@ -3747,6 +3751,11 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                     <ModelSelect
                         value={defaultModel}
                         options={buildAvailableModelOptions()}
+                        // Compact per explicit request — this is the one Active
+                        // Model control left after the overlay's own model
+                        // selector button was removed, so it stays deliberately
+                        // small/unobtrusive here rather than a wide w-40 trigger.
+                        widthClassName="w-24"
                         onChange={(val) => {
                             setDefaultModel(val);
                             // @ts-ignore - persist as default + update runtime + broadcast

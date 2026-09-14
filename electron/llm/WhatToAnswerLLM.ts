@@ -1264,8 +1264,21 @@ The user triggered this action with a coding problem on screen and NO new questi
             // support. Surface an actionable message for provider failures.
             const msg = String(error?.message ?? error ?? '').toLowerCase();
             const isProviderFailure = /\b(401|403|429)\b|api key|unauthor|forbidden|quota|rate.?limit|billing|exhausted|permission/.test(msg);
+            // Config-level failure (2026-09): distinct from the transient/auth
+            // cases above — a selected model the provider flatly refuses for
+            // this account (e.g. Codex CLI: "'gpt-X' model is not supported
+            // when using Codex with a ChatGPT account"). This is PERMANENT,
+            // not transient — retrying the identical request changes nothing,
+            // so the same silent-retry-then-graceful-line path that's correct
+            // for a flaky provider just burns cycles here for the rest of the
+            // session (every future question hits the same dead model) with
+            // no indication of why. Surface it immediately instead.
+            const isModelConfigFailure = /model\b.{0,40}\b(not supported|unsupported|not available|does not exist|not found|invalid)\b/.test(msg)
+                || /\b(not supported|unsupported)\b.{0,40}\bmodel\b/.test(msg);
             if (isProviderFailure) {
                 yield "I couldn't reach the AI provider — this looks like an API key or rate-limit issue. Check your API keys / plan in Settings and try again.";
+            } else if (isModelConfigFailure) {
+                yield "The selected model isn't available for your account — switch to a different model in Settings and try again.";
             } else {
                 // ALWAYS ANSWER (2026-09-07): yield NOTHING. The engine treats an
                 // empty stream as "regenerate once, then the honest

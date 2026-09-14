@@ -7,7 +7,7 @@ import {
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Download, Settings, Activity, ExternalLink, Trash2,
     Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal, PointerOff, Folder,
-    Star, AlertCircle, Gift, Smartphone, Cpu, Shield, Code2, Headphones, Boxes, ListOrdered
+    Star, AlertCircle, Gift, Smartphone, Cpu, Shield, Code2, Headphones, Boxes, ListOrdered, BookOpen, Maximize2
 } from 'lucide-react';
 import { AutoAnswerIcon } from './AutoAnswerIcon';
 import { HiCreditCard } from 'react-icons/hi2';
@@ -20,6 +20,7 @@ import { PhoneMirrorSettings } from './settings/PhoneMirrorSettings';
 import { EmbeddingSettings } from './settings/EmbeddingSettings';
 import { RerankerSettings } from './settings/RerankerSettings';
 import { IntelligenceSettings } from './settings/IntelligenceSettings';
+import { KnowledgeDocsPanel } from './settings/KnowledgeDocsPanel';
 import { SkillsSettings } from './settings/SkillsSettings';
 import { LocalWhisperModelPanel, type ChannelConfig as LocalWhisperChannelConfig } from './LocalWhisperModelPanel';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -419,6 +420,7 @@ const SETTINGS_NAV_ORDER = [
     'keybinds',
     'phone-mirror',
     'intelligence',
+    'knowledge',
     'help',
     'about',
 ];
@@ -586,7 +588,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [exportingLogs, setExportingLogs] = useState(false);
     const [exportResult, setExportResult] = useState<string | null>(null);
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
-    const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+    // Initial value matches the new backend default (true) to avoid a
+    // false->true flash before getAutoAnswerEnabled() resolves — see
+    // AppState's constructor in electron/main.ts.
+    const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(true);
     const [meetingRetention, setMeetingRetention] = useState<'forever' | '7d' | '30d' | 'never'>('forever');
     const [codeVerification, setCodeVerification] = useState(false);
     const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
@@ -1948,6 +1953,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <Cpu size={16} /> {t('Intelligence')}
                                     </button>
 
+                                    <button
+                                        onClick={() => setActiveTab('knowledge')}
+                                        className={navItemClass(activeTab === 'knowledge')}
+                                    >
+                                        {activeTab === 'knowledge' && navActivePill}
+                                        <BookOpen size={16} /> {t('Knowledge')}
+                                    </button>
+
 
                                     <button
                                         onClick={() => setActiveTab('help')}
@@ -2791,6 +2804,19 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                         <KeyRecorder
                                                             currentKeys={shortcuts.toggleVisibility}
                                                             onSave={(keys) => updateShortcut('toggleVisibility', keys)}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center justify-between py-1.5 group">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-text-tertiary group-hover:text-text-primary transition-colors w-5 flex justify-center"><Maximize2 size={14} /></span>
+                                                        <span className="text-sm text-text-secondary font-medium group-hover:text-text-primary transition-colors">{t('Expand / Collapse Overlay')}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        {renderShortcutConflictBadge('toggleExpand')}
+                                                        <KeyRecorder
+                                                            currentKeys={shortcuts.toggleExpand}
+                                                            onSave={(keys) => updateShortcut('toggleExpand', keys)}
                                                         />
                                                     </div>
                                                 </div>
@@ -3893,6 +3919,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
                             {activeTab === 'intelligence' && (
                                 <IntelligenceSettings />
+                            )}
+
+                            {activeTab === 'knowledge' && (
+                                <KnowledgeDocsPanel />
                             )}
 
                             {activeTab === 'help' && (

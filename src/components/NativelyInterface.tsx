@@ -27,44 +27,6 @@ import {
 import { categorizeSttError } from '../lib/sttErrorMapper';
 import { splitGistLine, splitGistLineStreaming, collapseBlockGaps } from '../lib/displayMarkup';
 
-import type { SkillSummary } from '../types/electron';
-
-function SkillPicker({
-  skills,
-  selectedIndex,
-  anchorEl,
-  onSelect,
-}: {
-  skills: SkillSummary[];
-  selectedIndex: number;
-  anchorEl: HTMLElement | null;
-  onSelect: (s: SkillSummary) => void;
-}) {
-  const rect = anchorEl?.getBoundingClientRect();
-  if (!rect) return null;
-  const style: React.CSSProperties = {
-    position: 'fixed',
-    left: rect.left,
-    bottom: window.innerHeight - rect.top + 6,
-    width: rect.width,
-    zIndex: 9999,
-  };
-  return (
-    <div style={style} className="rounded-xl border border-border-subtle bg-bg-card shadow-xl overflow-hidden max-h-48 overflow-y-auto">
-      {skills.map((skill, i) => (
-        <button
-          key={skill.id}
-          onMouseDown={(e) => { e.preventDefault(); onSelect(skill); }}
-          className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${i === selectedIndex ? 'bg-accent-muted text-text-primary' : 'hover:bg-bg-subtle/50 text-text-secondary'}`}
-        >
-          <span className="text-[11px] font-mono text-amber-400 shrink-0">/{skill.id}</span>
-          <span className="text-[11px] truncate flex-1">{skill.description}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /** Intents that show LLM answer content — pin chat panel on first stream token. */
 const ANSWER_PANEL_INTENTS = new Set([
   'what_to_answer',
@@ -235,7 +197,6 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
 import {
   collapseConsecutiveDuplicateSystemMessages,
   shouldDedupeOverlayAction,
@@ -345,10 +306,8 @@ import {
   OVERLAY_OPACITY_DEFAULT,
 } from '../lib/overlayAppearance';
 import { NegotiationCoachingCard } from '../premium';
-import type { DynamicActionPayload } from '../types/electron';
 import { getCodexCliModelDisplayName, litellmModelLabel } from '../utils/modelUtils';
 import { getModifierSymbol, isMac, isWindows } from '../utils/platformUtils';
-import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
 import GlassEffectLayer from './ui/GlassEffectLayer';
 import { OverlayBanner, OverlayBannerButton } from './ui/OverlayBanner';
 import RollingTranscript from './ui/RollingTranscript';
@@ -447,6 +406,11 @@ interface Message {
   fallbackNotice?: string;
   isCode?: boolean;
   intent?: string;
+  // Free-tier Interview Knowledge citations (docs/specs/oss-knowledge-rag-spec.md)
+  // — which document snippet(s) actually backed this answer. Renders as a
+  // collapsed, expandable "Sources" affordance on the card. Absent when no
+  // Interview Knowledge doc was retrieved for this turn.
+  citations?: Array<{ sourceId: string; fileName: string; text: string }>;
   // Verified code execution: set when the code in this message passed N executed
   // test cases (renderer shows a small "✓ verified" badge). undefined = not (yet)
   // verified — we NEVER show the badge speculatively.
@@ -1191,6 +1155,42 @@ const MessageRow = React.memo(
                 <span className="truncate max-w-[260px]">{msg.fallbackNotice}</span>
               </div>
             )}
+            {/* Interview Knowledge citations (docs/specs/oss-knowledge-rag-spec.md):
+                collapsed by default, expandable — lets the answer be audited
+                against the exact source text during a live interview without
+                cluttering the card when it's not needed. */}
+            {msg.role === 'system' && msg.citations && msg.citations.length > 0 && (
+              <details className="mt-1.5 text-[10px] opacity-70">
+                <summary className="cursor-pointer select-none">
+                  {t('Sources')} ({msg.citations.length})
+                </summary>
+                <div className="mt-1 space-y-1.5 max-w-[320px]">
+                  {msg.citations.map((c, i) => {
+                    // Defensive cap (2026-09): a retrieved chunk's `text` is
+                    // NOT length-bounded before it reaches here — a source
+                    // document with little/no whitespace to chunk on (e.g. a
+                    // dense, single-line HTML export) can hand this a huge
+                    // unbroken string. The UI already visually clamps to 3
+                    // lines (line-clamp-3), so nothing is lost by capping the
+                    // underlying string first — but an unbounded string with
+                    // near-zero whitespace forced through whitespace-pre-wrap
+                    // + line-clamp is a real layout-engine pathology, not
+                    // just a cosmetic concern, so cap before it ever reaches
+                    // the DOM rather than relying on CSS alone to hide it.
+                    const CITATION_TEXT_MAX_CHARS = 600;
+                    const displayText = c.text.length > CITATION_TEXT_MAX_CHARS
+                      ? `${c.text.slice(0, CITATION_TEXT_MAX_CHARS)}…`
+                      : c.text;
+                    return (
+                      <div key={`${c.sourceId}-${i}`} className="rounded border border-current/10 px-1.5 py-1">
+                        <div className="font-medium truncate">{c.fileName}</div>
+                        <div className="opacity-80 line-clamp-3 whitespace-pre-wrap">{displayText}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            )}
             {/* Verified badge: the code in this message passed executed tests. */}
             {msg.role === 'system' && msg.codeVerified && (
               <div className="flex items-center gap-1 mt-1.5 text-[10px] font-medium text-green-500" title={`Ran ${msg.codeVerified.total} test case(s) successfully`}>
@@ -1227,10 +1227,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const t = useT();
   const [isExpanded, setIsExpanded] = useState(true);
   const [inputValue, setInputValue] = useState('');
-  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
-  const [skillPickerIndex, setSkillPickerIndex] = useState(0);
   const { shortcuts, isShortcutPressed } = useShortcuts();
   const [messages, setMessages] = useState<Message[]>([]);
+  // Unbounded-growth guard (teleprompter rework, 2026-09): the old scrollback
+  // UI that used to be the only reader of `messages` is gone, but nothing
+  // ever capped this array's length — every Q&A round (plus, now, citation
+  // text — see MessageRow's Sources block) keeps accumulating in it for the
+  // life of the meeting with no ceiling. Meeting notes are unaffected (they
+  // read off SessionTracker's own backend copy, not this renderer array —
+  // see NativelyInterface's teleprompter-rework comments above answerHistory).
+  // Trimming from the front keeps the most recent (and therefore most
+  // relevant to history navigation) messages; only fires when actually over
+  // the cap, so it can't itself loop.
+  const MAX_STORED_MESSAGES = 60;
+  useEffect(() => {
+    if (messages.length > MAX_STORED_MESSAGES) {
+      setMessages((prev) => (prev.length > MAX_STORED_MESSAGES ? prev.slice(-MAX_STORED_MESSAGES) : prev));
+    }
+  }, [messages.length]);
   // Keep chat history visible once an answer lands until explicit clear / session reset.
   const [answerPanelPinned, setAnswerPanelPinned] = useState(false);
   const answerPanelPinnedRef = useRef(false);
@@ -1659,6 +1673,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   const [rollingTranscript, setRollingTranscript] = useState(''); // For interviewer rolling text bar
   const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false); // Track if actively speaking
+  // Teleprompter dual-channel feed (live-overlay-ui-spec.md Section 1.6): the
+  // user's own mic speech used to be dropped entirely from the rolling bar
+  // (only captured while the manual Answer/Stop recording was active). It now
+  // gets its own rolling line, same merge helpers as the interviewer channel,
+  // so both speakers show live — independent of whether a manual recording
+  // is in progress.
+  const [rollingTranscriptUser, setRollingTranscriptUser] = useState('');
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const userSpeakingRef = useRef(false);
+  const rollingPartialDebounceUserRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRollingPartialUserRef = useRef<string | null>(null);
   // Debounce partial STT ticks so answer/solution rows are not drowned in re-renders.
   const rollingPartialDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRollingPartialRef = useRef<string | null>(null);
@@ -1877,27 +1902,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, []);
 
   useEffect(() => {
-    window.electronAPI?.skillsRefresh?.()
-      // Filter disabled skills out of the autocomplete picker as a defensive
-      // measure — the SkillsManager still carries an `enabled` field (set via
-      // a future IPC that doesn't exist yet today) and the server-side gate
-      // in ipcHandlers.ts honors it. Today every skill returned by
-      // skillsRefresh has enabled === true, so this filter is a no-op; once
-      // a future feature exposes disable, the picker already filters correctly.
-      .then((list: SkillSummary[]) => setAvailableSkills(
-        Array.isArray(list) ? list.filter(s => s.enabled !== false) : [],
-      ))
-      .catch(() => {});
-  }, []);
-
-  // NOTE: live-refresh subscription removed (onSkillsChanged broadcast went
-  // with the toggle UI). The picker is fetched once on mount. Users who
-  // delete a skill in Settings then switch back to the overlay will see a
-  // stale autocomplete until the next mount — acceptable for v1. A future
-  // fix could re-fetch on overlay focus, but that's a polish item separate
-  // from this feature.
-
-  useEffect(() => {
     let mounted = true;
     const loadLlmRoute = async () => {
       const config = await window.electronAPI?.getCurrentLlmConfig?.().catch(() => null);
@@ -2017,8 +2021,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const codeBlockClass = 'overlay-code-block-surface';
   const codeHeaderClass = 'overlay-code-header-surface';
   const codeHeaderTextClass = 'overlay-text-muted';
-  const quickActionClass = 'overlay-chip-surface overlay-text-interactive';
-  const inputClass = `aurora-focus overlay-input-surface overlay-input-text`;
   const controlSurfaceClass = 'overlay-control-surface overlay-text-interactive';
 
   // PERF: hoist ReactMarkdown `components` maps for every streaming intent
@@ -6022,6 +6024,43 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     () => collapseConsecutiveDuplicateSystemMessages(messages),
     [messages],
   );
+  // Teleprompter rework: Auto-Answer is now the only trigger (no manual
+  // buttons), so the overlay shows ONE current answer, replaced wholesale as
+  // new questions land — not a scrollback. `messages`/`setMessages` and the
+  // SessionTracker push behind them are UNCHANGED (meeting notes still read
+  // off the full transcript independently of what's rendered here); this only
+  // changes what's rendered. The last role==='system' row is the answer
+  // (recap/clarify/follow-up/brainstorm all land as role==='system' via the
+  // same finalize path) — role==='user'/'interviewer' rows are synthetic
+  // question echoes with no equivalent in the new no-scrollback design.
+  const answerHistory = useMemo(
+    () => displayMessages.filter((m) => m.role === 'system'),
+    [displayMessages],
+  );
+  // History navigation (explicit request): the scrollback is gone, but every
+  // past answer is still sitting in `messages` — just not rendered live
+  // anymore. 0 = live/latest; N = N answers back. Repurposes the existing
+  // CommandOrControl+Up/Down shortcuts (chat:scrollUp/scrollDown), which
+  // scrolled the now-removed scrollback and would otherwise be dead.
+  const [historyOffset, setHistoryOffset] = useState(0);
+  // Read inside the global keydown listener below, which is bound once (not
+  // re-bound on every render) — a plain closure over `answerHistory.length`
+  // there would go stale, so the listener reads this ref instead.
+  const answerHistoryLengthRef = useRef(0);
+  // Safety-net timer for the "Generating answer…" state — see
+  // onIntelligenceAutoAnswerStarted below.
+  const autoAnswerStartTokenRef = useRef(0);
+  const autoAnswerStuckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    answerHistoryLengthRef.current = answerHistory.length;
+    setHistoryOffset((prev) => Math.min(prev, Math.max(0, answerHistory.length - 1)));
+  }, [answerHistory.length]);
+  const currentAnswerMessage = useMemo(() => {
+    if (answerHistory.length === 0) return null;
+    const idx = Math.max(0, answerHistory.length - 1 - historyOffset);
+    return answerHistory[idx];
+  }, [answerHistory, historyOffset]);
+  const isViewingAnswerHistory = historyOffset > 0;
   // ──────────────────────────────────────────────────────────────────────────
 
   const applyRollingPartialPreview = useCallback((partialText: string) => {
@@ -6047,6 +6086,35 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     pendingRollingPartialRef.current = null;
     if (text != null) {
       setRollingTranscript((prev) => mergeRollingTranscriptPartial(prev, text));
+    }
+  }, []);
+
+  // User-channel counterparts (Section 1.6) — same debounce/merge shape as
+  // the interviewer channel above, kept as separate state/refs so the two
+  // channels can never clobber each other's in-progress tail.
+  const applyRollingPartialPreviewUser = useCallback((partialText: string) => {
+    pendingRollingPartialUserRef.current = partialText;
+    if (rollingPartialDebounceUserRef.current !== null) {
+      clearTimeout(rollingPartialDebounceUserRef.current);
+    }
+    rollingPartialDebounceUserRef.current = setTimeout(() => {
+      rollingPartialDebounceUserRef.current = null;
+      const text = pendingRollingPartialUserRef.current;
+      pendingRollingPartialUserRef.current = null;
+      if (text == null) return;
+      setRollingTranscriptUser((prev) => mergeRollingTranscriptPartial(prev, text));
+    }, 80);
+  }, []);
+
+  const flushRollingPartialPreviewUser = useCallback(() => {
+    if (rollingPartialDebounceUserRef.current !== null) {
+      clearTimeout(rollingPartialDebounceUserRef.current);
+      rollingPartialDebounceUserRef.current = null;
+    }
+    const text = pendingRollingPartialUserRef.current;
+    pendingRollingPartialUserRef.current = null;
+    if (text != null) {
+      setRollingTranscriptUser((prev) => mergeRollingTranscriptPartial(prev, text));
     }
   }, []);
 
@@ -6098,13 +6166,28 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return; // Don't add to messages while recording
         }
 
-        // Ignore user mic transcripts when not recording
-        // Only interviewer (system audio) transcripts should appear in chat
+        // User (mic) channel, not manually recording: routed to its own
+        // rolling-transcript line instead of being dropped — the teleprompter
+        // feed shows both speakers live (Section 1.6). Manual-recording
+        // capture above still takes priority via the early return at :6113.
         if (transcript.speaker === 'user') {
-          return; // Skip user mic input - only relevant when Answer button is active
+          if (!transcript.final) {
+            if (!userSpeakingRef.current) {
+              userSpeakingRef.current = true;
+              setIsUserSpeaking(true);
+            }
+            applyRollingPartialPreviewUser(transcript.text);
+            return;
+          }
+          flushRollingPartialPreviewUser();
+          userSpeakingRef.current = false;
+          setIsUserSpeaking(false);
+          setRollingTranscriptUser((prev) => mergeRollingTranscriptFinal(prev, transcript.text));
+          setTimeout(() => setIsUserSpeaking(false), 3000);
+          return;
         }
 
-        // Only show interviewer (system audio) transcripts in rolling bar
+        // Only show interviewer (system audio) transcripts in the other line
         if (transcript.speaker !== 'interviewer') {
           return; // Safety check for any other speaker types
         }
@@ -6178,6 +6261,30 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
+      window.electronAPI.onIntelligenceAutoAnswerStarted?.(() => {
+        if (activeDirectAssistRef.current) return;
+        if (legacyIntelligenceTombstonedRef.current) return;
+        // Fixes "still shows Waiting for a question after the question ends":
+        // this fires right when the judge approves and dispatch begins — the
+        // token handlers below only flip isProcessing implicitly via the
+        // first token, leaving the whole judge+retrieval+TTFT gap looking
+        // idle. Cleared normally by whichever done handler lands.
+        setIsProcessing(true);
+        // Safety net: the second-stage planner inside handleSuggestionTrigger
+        // can still decide 'silent' after this fires, with no done event of
+        // any kind reaching the renderer — without a timeout that would stick
+        // "Generating answer…" on screen forever. Token-gated so a stale
+        // timer from a superseded cycle can never clobber a newer one's true.
+        const myToken = ++autoAnswerStartTokenRef.current;
+        if (autoAnswerStuckTimerRef.current !== null) clearTimeout(autoAnswerStuckTimerRef.current);
+        autoAnswerStuckTimerRef.current = setTimeout(() => {
+          autoAnswerStuckTimerRef.current = null;
+          if (autoAnswerStartTokenRef.current === myToken) setIsProcessing(false);
+        }, 15000);
+      }) ?? (() => {}),
+    );
+
+    cleanups.push(
       window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
@@ -6215,8 +6322,30 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const answerText = isStale && data.question
           ? `(Late answer to: "${data.question}")\n\n${data.answer}`
           : data.answer;
+        // Interview Knowledge citations: same merge-onto-row-by-id pattern as
+        // the manual-chat 'gemini-stream-done' handler above — captured
+        // BEFORE finalize (which may clear streamingMsgIdRef), so the merge
+        // targets the row this answer actually streamed into.
+        const citationsSnapshot = (data as { citations?: Array<{ sourceId: string; fileName: string; text: string }> }).citations;
+        const pendingMsgIdForCitations = streamingMsgIdRef.current;
+        if (citationsSnapshot?.length && pendingMsgIdForCitations != null) {
+          setMessages((prev) => {
+            const idx = prev.findLastIndex((m) => m.id === pendingMsgIdForCitations);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = { ...updated[idx], citations: citationsSnapshot };
+            return updated;
+          });
+        }
         setIsProcessing(false);
         pinAnswerPanel();
+        // Clean the boards (explicit request): once an answer completes, the
+        // Question board resets to "Listening…" so the next question's
+        // transcript doesn't run on from this one's leftover text. The
+        // answer itself stays on screen — it's only replaced once the NEXT
+        // answer actually starts streaming, never cleared preemptively.
+        setRollingTranscript('');
+        setRollingTranscriptUser('');
         finalizeStreamingByIntent('what_to_answer', answerText);
       }),
     );
@@ -6417,6 +6546,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onIntelligenceRecap((data) => {
         if (activeDirectAssistRef.current) return;
         setIsProcessing(false);
+        setRollingTranscript('');
+        setRollingTranscriptUser('');
         finalizeStreamingByIntent('recap', data.summary);
       }),
     );
@@ -6444,6 +6575,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onIntelligenceFollowUpQuestionsUpdate((data) => {
         if (activeDirectAssistRef.current) return;
         setIsProcessing(false);
+        setRollingTranscript('');
+        setRollingTranscriptUser('');
         finalizeStreamingByIntent('follow_up_questions', data.questions);
       }),
     );
@@ -6452,6 +6585,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onIntelligenceClarify((data) => {
         if (activeDirectAssistRef.current) return;
         setIsProcessing(false);
+        setRollingTranscript('');
+        setRollingTranscriptUser('');
         finalizeStreamingByIntent('clarify', data.clarification);
       }),
     );
@@ -7106,6 +7241,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const pendingMsgIdSnapshot = streamingMsgIdRef.current;
         const authoritativeText = finalText || pendingTextSnapshot;
 
+        // Interview Knowledge citations: merged onto the row independently of
+        // the text-commit timing below (deferred-reveal vs. instant) — the row
+        // already exists by id at this point (created when streaming started),
+        // so this doesn't need to coordinate with either commit path.
+        if (data?.citations?.length && pendingMsgIdSnapshot != null) {
+          const citationsSnapshot = data.citations;
+          setMessages((prev) => {
+            const idx = prev.findLastIndex((m) => m.id === pendingMsgIdSnapshot);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = { ...updated[idx], citations: citationsSnapshot };
+            return updated;
+          });
+        }
+
         setIsProcessing(false);
 
         // Calculate latency if we have a start time
@@ -7727,13 +7877,6 @@ Provide only the answer, nothing else.`;
       }
     }
   };
-
-  const selectSkill = useCallback((skill: SkillSummary) => {
-    const prefix = inputValue.startsWith('$') ? '$' : '/';
-    setInputValue(`${prefix}${skill.id} `);
-    setSkillPickerIndex(0);
-    textInputRef.current?.focus();
-  }, [inputValue]);
 
   const handleManualSubmit = async () => {
     if (!inputValue.trim() && attachedContext.length === 0) return;
@@ -8607,11 +8750,20 @@ Provide only the answer, nothing else.`;
         handleBrainstorm();
       } else if (isShortcutPressed(e, 'scrollUp')) {
         e.preventDefault();
+        // Repurposed for answer-history navigation (explicit request): one
+        // step back per physical press, not per auto-repeat, since this is a
+        // discrete "previous answer" step now, not continuous pixel scroll.
+        if (!e.repeat) {
+          setHistoryOffset((prev) => Math.min(prev + 1, Math.max(0, answerHistoryLengthRef.current - 1)));
+        }
         upHeld = true;
         recomputeDirection();
         startScrollLoop();
       } else if (isShortcutPressed(e, 'scrollDown')) {
         e.preventDefault();
+        if (!e.repeat) {
+          setHistoryOffset((prev) => Math.max(prev - 1, 0));
+        }
         downHeld = true;
         recomputeDirection();
         startScrollLoop();
@@ -8963,8 +9115,8 @@ Provide only the answer, nothing else.`;
       else if (action === 'clarify') handlers.handleClarify();
       else if (action === 'codeHint') handlers.handleCodeHint();
       else if (action === 'brainstorm') handlers.handleBrainstorm();
-      else if (action === 'scrollUp') inertialScrollRef.current?.kick('vert', -1);
-      else if (action === 'scrollDown') inertialScrollRef.current?.kick('vert', 1);
+      else if (action === 'scrollUp') setHistoryOffset((prev) => Math.min(prev + 1, Math.max(0, answerHistoryLengthRef.current - 1)));
+      else if (action === 'scrollDown') setHistoryOffset((prev) => Math.max(prev - 1, 0));
       else if (action === 'scrollLeft') inertialScrollRef.current?.kick('horiz', -1);
       else if (action === 'scrollRight') inertialScrollRef.current?.kick('horiz', 1);
       else if (action === 'focusInput') {
@@ -8981,6 +9133,7 @@ Provide only the answer, nothing else.`;
       else if (action === 'resetCancel') generalHandlers.resetCancel();
       else if (action === 'takeScreenshot') generalHandlers.takeScreenshot();
       else if (action === 'selectiveScreenshot') generalHandlers.selectiveScreenshot();
+      else if (action === 'toggleExpand') setIsExpanded((v) => !v);
 
       // Safety reset if it didn't trigger an expansion
       setTimeout(() => {
@@ -9403,19 +9556,6 @@ Provide only the answer, nothing else.`;
       document.body.removeChild(ta);
     }
   };
-
-  // Skill picker: derived from inputValue — open when the user types / or $ followed
-  // only by word chars (no space yet). Closes automatically once a space is typed.
-  const skillPickerQuery = (() => {
-    const m = inputValue.match(/^[/$]([A-Za-z0-9_-]*)$/);
-    return m ? m[1].toLowerCase() : null;
-  })();
-  const filteredSkills = skillPickerQuery !== null
-    ? availableSkills.filter(
-        (s) => s.id.includes(skillPickerQuery) || s.name.toLowerCase().includes(skillPickerQuery),
-      )
-    : [];
-  const clampedPickerIndex = Math.min(skillPickerIndex, Math.max(0, filteredSkills.length - 1));
 
   return (
     <>
@@ -9867,21 +10007,20 @@ Provide only the answer, nothing else.`;
                 </div>
               )}
 
-              {/* Phase 3 — Dynamic action card row (Cluely-style live triggers).
-                                Appears between status pills and rolling transcript so users see
-                                actionable suggestions in their primary scan path. Bar self-hides
-                                when no actions are present. */}
-              <DynamicActionBar
-                onAcceptAction={(action: DynamicActionPayload) => {
-                  void handleWhatToSay(action.promptInstruction);
-                }}
-              />
-
               {/* Rolling Transcript Bar — live transcript + on-demand diagnostics
                   for hard failures. Reconnecting/awaiting-audio status is owned by
                   the top status pill, so the bar no longer mounts for those (which
                   also avoids an empty bar / duplicated status text). */}
-              {showTranscript && rollingTranscript ? (
+              {/* Deliberately interviewer-only: only the question being asked
+                  and the answer belong on screen during a live interview.
+                  Your own speech still gets captured/recorded (SessionTracker
+                  ingests it independently of this component), it's just not
+                  rendered as a third line here. */}
+              {/* Always mounted (not gated on rollingTranscript being
+                  non-empty) so the "Question" box is visible from the start
+                  at minimal size, showing a Listening… placeholder, rather
+                  than the whole panel appearing only once speech arrives. */}
+              {showTranscript ? (
                 <RollingTranscript
                   text={rollingTranscript}
                   isActive={isInterviewerSpeaking}
@@ -9899,16 +10038,14 @@ Provide only the answer, nothing else.`;
                 />
               ) : null}
 
-              {/* Chat History - Only show if there are messages OR active states,
-                  or a pinned height that needs a viewport to fill it. No padding
-                  while mounted for the pin alone: box-sizing keeps a padded box
-                  at its padding (32px) however small its max-height, which
-                  showed as a gap under the transcript and pushed the footer
-                  past the window once the chrome had outgrown the pin. */}
-              {showAnswerPanel && (
+              {/* Chat History — always mounted (not gated on hasChatContent
+                  anymore) at minimal size with a "You" label + placeholder,
+                  so the answer box is visible from the start and expands as
+                  the answer streams in, mirroring the Question box above. */}
+              {(
                 <motion.div
                   ref={scrollContainerRef}
-                  className={`relative z-10 flex-1 overflow-y-auto overflow-x-hidden ${hasChatContent ? 'p-4 space-y-3' : 'p-0'} no-drag isolate`}
+                  className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 no-drag isolate"
                   layout={false}
                   style={{ scrollbarWidth: 'none', maxHeight: scrollMaxH, minHeight: scrollMinH }}
                 >
@@ -9924,21 +10061,94 @@ Provide only the answer, nothing else.`;
                                         suppresses transitions during scroll) keeps the
                                         motion calm.
 
-                                        Each row is rendered through React.memo'd MessageRow
-                                        so a setMessages on the streaming row does NOT
-                                        re-render every prior message — bailout fires on
-                                        identity equality (msg, theme, callbacks). */}
-                  {displayMessages
-                    .map((msg: Message) => (
-                    <MessageRow
-                      key={msg.id}
-                      msg={msg}
-                      isLightTheme={isLightTheme}
-                      appearance={appearance}
-                      onCopy={handleCopy}
-                      renderMessageText={renderMessageText}
-                    />
-                  ))}
+                                        Teleprompter rework: only the current answer renders here —
+                  see currentAnswerMessage above. Still routed through the same
+                  React.memo'd MessageRow (citations, code-verified badge,
+                  correction header, markdown rendering all come for free). */}
+                  <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider overlay-text-muted mb-1">
+                    {t('You')}
+                    {isViewingAnswerHistory && (
+                      <span className="normal-case tracking-normal text-accent-primary/80">
+                        {t('· viewing previous answer (⌘/Ctrl+↓ for latest)')}
+                      </span>
+                    )}
+                  </div>
+                  {currentAnswerMessage ? (
+                    // Highlighted while actively streaming so the currently-
+                    // generating answer is easy to spot/read at a glance;
+                    // the highlight fades once the answer settles. The box
+                    // model (padding/margin/border WIDTH) stays constant
+                    // across both states — only color/opacity toggles — so
+                    // this can never change the element's measured size and
+                    // feed back into the window's content-height auto-sizing
+                    // (confirmed real bug: an earlier version toggled -mx-2
+                    // padding itself, changing width exactly when isStreaming
+                    // flipped, i.e. exactly when an answer completed — the
+                    // same moment a "Maximum update depth exceeded" loop was
+                    // reported).
+                    <div
+                      className={`rounded-lg border -mx-2 px-2 py-1 transition-colors duration-300 ${
+                        currentAnswerMessage.isStreaming
+                          ? 'bg-accent-primary/5 border-accent-primary/15'
+                          : 'bg-transparent border-transparent'
+                      }`}
+                    >
+                      <MessageRow
+                        key={currentAnswerMessage.id}
+                        msg={currentAnswerMessage}
+                        isLightTheme={isLightTheme}
+                        appearance={appearance}
+                        onCopy={handleCopy}
+                        renderMessageText={renderMessageText}
+                      />
+                    </div>
+                  ) : isProcessing ? (
+                    // Streaming hasn't produced its first token yet — a
+                    // highlighted "Generating answer…" placeholder so there's
+                    // always something visible to read during the wait,
+                    // rather than a blank box.
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent-primary/10 border border-accent-primary/20 text-[13px] overlay-text-primary w-fit">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent-primary animate-pulse" />
+                      {t('Generating answer…')}
+                    </div>
+                  ) : (
+                    <div className="text-[13px] overlay-text-muted italic">
+                      {t('Waiting for a question…')}
+                    </div>
+                  )}
+
+                  {/* Answer-history nav arrows (explicit request): a visible
+                      back/forward control for the same historyOffset state the
+                      Ctrl/Cmd+Up/Down shortcuts already drive — kept distinct
+                      from the removed action buttons (What to Answer, Clarify,
+                      etc.) since this only navigates already-generated output,
+                      it never triggers new generation. Hidden with 0-1 answers
+                      since there is nothing to navigate to yet. */}
+                  {answerHistory.length > 1 && (
+                    <div className="flex items-center justify-center gap-2 mt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setHistoryOffset((prev) => Math.min(prev + 1, Math.max(0, answerHistory.length - 1)))}
+                        disabled={historyOffset >= answerHistory.length - 1}
+                        title={t('Previous answer')}
+                        className="p-1 rounded-full overlay-text-muted hover:overlay-text-primary hover:bg-current/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+                      </button>
+                      <span className="text-[10px] overlay-text-muted tabular-nums select-none">
+                        {answerHistory.length - historyOffset} / {answerHistory.length}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setHistoryOffset((prev) => Math.max(prev - 1, 0))}
+                        disabled={historyOffset <= 0}
+                        title={t('Next answer')}
+                        className="p-1 rounded-full overlay-text-muted hover:overlay-text-primary hover:bg-current/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+                      </button>
+                    </div>
+                  )}
 
                   {/* Active Recording State with Live Transcription */}
                   {isManualRecording && (
@@ -10008,701 +10218,6 @@ Provide only the answer, nothing else.`;
                   <div ref={scrollSpacerRef} aria-hidden="true" style={{ height: 0 }} />
                 </motion.div>
               )}
-
-              {/* Quick Actions - Minimal & Clean.
-                  Split into an outer positioning-only wrapper + an inner row
-                  that owns the actual flex layout and `overflow-x-hidden`
-                  (present since the very first commit — see
-                  d7101217 "contain horizontal scrolling to code blocks" —
-                  load-bearing, not removable). The split matters because
-                  `overflow-x: hidden` on an element whose `overflow-y` is
-                  otherwise 'visible' makes the BROWSER coerce that y-axis to
-                  'auto' per the CSS spec (you can't have one axis truly
-                  visible while the other is clipped/scrollable) — so the
-                  jump-to-latest pill's `bottom-full` (poking out ABOVE the
-                  row) was being silently clipped by the inner row's own
-                  auto-overflow box, even though every computed style on the
-                  pill itself (opacity, visibility, background contrast) was
-                  completely correct. Confirmed live: forcing the row's
-                  overflow to 'visible' via devtools made the pill appear
-                  instantly with no other changes. The outer wrapper here
-                  carries no overflow of its own, so the pill (a direct child
-                  of the OUTER div, sibling to the inner row) is never
-                  clipped, while the inner row keeps its original horizontal
-                  containment intact. */}
-              <div className="relative">
-                {/* Jump-to-latest pill — shown while auto-scroll is
-                    suppressed (user scrolled up mid-stream) and the view
-                    isn't already near the bottom. Anchored to THIS row
-                    (always rendered, Answer button as its rightmost item)
-                    rather than to the scroll container: the scroll container
-                    only grows to scrollMaxH once content actually overflows,
-                    so anchoring the pill there could visually land near the
-                    top of a short conversation instead of pinned to the
-                    panel's true bottom. `bottom-full` + `mb-2` floats it just
-                    above this row's top edge — directly above the Answer
-                    button — regardless of the row's or the chat history's
-                    height, no scroll-content dependency and no magic pixel
-                    offsets.
-
-                    Sized and positioned to match ResizeToggle
-                    (src/components/ui/ResizeToggle.tsx) at the user's
-                    request, but NOT the same material or motion — see the
-                    style/transition comments on the element below for the
-                    current surface (overlay-icon-surface) and animation
-                    (asymmetric spring-in / ease-out-exit) actually in use.
-                    Unlike ResizeToggle this pill does NOT default to a
-                    dimmed 0.72 opacity — that dimming exists there because
-                    window-chrome controls should recede until interacted
-                    with, but this pill only ever appears when there's
-                    actually something to jump to, so staying fully visible
-                    is the right call for what is effectively a lightweight
-                    notification affordance. */}
-                <AnimatePresence>
-                  {showJumpToLatest && (
-                    <motion.button
-                      key="jump-to-latest"
-                      type="button"
-                      // Same "don't steal focus from the chat input" idiom
-                      // ResizeToggle uses — see its onMouseDown comment.
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={handleJumpToLatest}
-                      aria-label={t('Jump to latest')}
-                      title={t('Jump to latest')}
-                      data-interface-theme={isGlassTheme ? 'liquid-glass' : isModernTheme ? 'modern' : 'default'}
-                      // NOT overlay-resize-toggle-surface/appearance.shellStyle
-                      // despite matching ResizeToggle everywhere else on this
-                      // button (motion, size, gloss sheen): that surface is
-                      // documented in index.css as "matches the shell/pill
-                      // material" specifically FOR chrome that floats OUTSIDE
-                      // the panel (ResizeToggle, TopPill's outer pill), where
-                      // it contrasts against the transparent desktop behind
-                      // it. This pill lives INSIDE the panel — same material
-                      // as its own background renders it nearly invisible
-                      // there (confirmed visually: shellStyle's background is
-                      // within a few RGB points of the panel body it sits on,
-                      // and default theme carries no box-shadow on that
-                      // surface to compensate). overlay-icon-surface +
-                      // appearance.iconStyle is index.css's own "embedded
-                      // button" recipe (used by the X/remove-attachment
-                      // buttons etc.) — deliberately a lighter tone so
-                      // embedded controls pop against the panel body instead
-                      // of blending into it.
-                      //
-                      // No inline border here (a previous version hardcoded
-                      // one): every other .overlay-icon-surface consumer in
-                      // this file (e.g. the X/remove-attachment button) is
-                      // borderless and lets each theme's CSS own the edge
-                      // treatment entirely — modern's rule sets a real
-                      // `border` with !important, but liquid-glass's rule
-                      // deliberately has NO border at all, relying purely on
-                      // its box-shadow insets for the glass edge highlight
-                      // (matching border-color:transparent on the sibling
-                      // .overlay-resize-toggle-surface glass rule). A
-                      // hardcoded inline border here would sit on top of the
-                      // glass box-shadow and read as a generic flat outline
-                      // instead of the intended glass look — dropping it
-                      // lets default/liquid-glass/modern each fully own their
-                      // own established per-theme styling, which is what
-                      // "same style as default, liquid-glass-y in glass,
-                      // modern-y in modern" actually means here.
-                      className="absolute right-3 bottom-full mb-2 z-20 no-drag flex h-[28px] w-[28px] items-center justify-center overflow-hidden rounded-full overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
-                      // `position: 'absolute'` inline is NOT redundant with the
-                      // `absolute` Tailwind class above — modern theme's own
-                      // `[data-interface-theme="modern"] .overlay-icon-surface`
-                      // rule (index.css) sets `position: relative` (needed for
-                      // that rule's own ::before gloss pseudo-element, which
-                      // every other .overlay-icon-surface consumer wants,
-                      // since none of them are absolutely positioned floating
-                      // chrome like this pill is). That selector is MORE
-                      // specific than a bare `.absolute` utility class (two
-                      // class-level selectors vs one) and isn't tagged
-                      // !important, so in modern theme it silently won the
-                      // cascade and knocked this button out of its intended
-                      // floating position back into normal document flow —
-                      // confirmed live: the pill rendered pinned to the row's
-                      // LEFT edge instead of floating top-right in modern
-                      // theme only (default/liquid-glass don't set `position`
-                      // on this class at all, so they were unaffected). An
-                      // inline style always wins over a non-!important class
-                      // rule regardless of selector specificity, so this is
-                      // the surgical fix — no change to the shared class used
-                      // by every other embedded icon button in the app.
-                      style={{ ...appearance.iconStyle, position: 'absolute' }}
-                      // Asymmetric enter/exit, not the same curve reversed.
-                      // Enter: this pill is a notification-style affordance
-                      // (see the block comment above) that appears because
-                      // the user just made a deliberate scroll-up gesture —
-                      // it should feel like it rises up to meet them, so it
-                      // slides up a few px (y: 6 -> 0) while it fades/scales
-                      // in, using a spring (not the file's usual tween) for
-                      // the same "alive" quality ResizeToggle's icon-swap
-                      // reserves for its own state changes. Exit: the user
-                      // scrolled back to the bottom themselves (or clicked
-                      // it) — there's nothing left to communicate, so it
-                      // should get out of the way fast. It settles down
-                      // slightly (y: 0 -> 4, the mirror-opposite direction of
-                      // the entrance) on the file's established strong
-                      // ease-out curve at a shorter duration than the
-                      // entrance, rather than reusing the entrance transition
-                      // in reverse.
-                      initial={
-                        prefersReducedMotionRef.current
-                          ? { opacity: 0 }
-                          : { opacity: 0, scale: 0.9, y: 6 }
-                      }
-                      animate={
-                        prefersReducedMotionRef.current
-                          ? { opacity: 1, transition: { duration: 0.15, ease: [0.23, 1, 0.32, 1] } }
-                          : {
-                              opacity: 1,
-                              scale: 1,
-                              y: 0,
-                              transition: { type: 'spring', duration: 0.4, bounce: 0.22 },
-                            }
-                      }
-                      exit={
-                        prefersReducedMotionRef.current
-                          ? { opacity: 0, transition: { duration: 0.12, ease: [0.23, 1, 0.32, 1] } }
-                          : {
-                              opacity: 0,
-                              scale: 0.95,
-                              y: 4,
-                              transition: { duration: 0.15, ease: [0.23, 1, 0.32, 1] },
-                            }
-                      }
-                      whileHover={
-                        prefersReducedMotionRef.current
-                          ? undefined
-                          : { scale: 1.06, transition: { duration: 0.15, ease: [0.23, 1, 0.32, 1] } }
-                      }
-                      whileTap={
-                        prefersReducedMotionRef.current
-                          ? undefined
-                          : { scale: 0.92, transition: { duration: 0.1, ease: [0.23, 1, 0.32, 1] } }
-                      }
-                    >
-                      {/* No manual gloss-sheen span here (an earlier version
-                          copied ResizeToggle's jelly-gloss <span> wholesale).
-                          Removed: the other overlay-icon-surface consumer in
-                          this file (the X/remove-attachment button, ~line
-                          8116) has no such decoration and relies entirely on
-                          the shared CSS class for its per-theme look — modern
-                          theme's own `.overlay-icon-surface::before` rule
-                          already generates an equivalent gloss pseudo-element
-                          purely in CSS, so a manual span duplicated it there,
-                          and liquid-glass's box-shadow insets already supply
-                          its own highlight. In DEFAULT theme specifically the
-                          manual sheen had no CSS counterpart to duplicate, so
-                          it just added an out-of-place glossy highlight none
-                          of this theme's other flat embedded buttons have —
-                          exactly the "mixed-in modern styling" this button
-                          shouldn't have. Dropping it makes all three themes
-                          consistent with how every other overlay-icon-surface
-                          button in the app is styled: pure CSS-class-driven,
-                          no bespoke JSX decoration layered on top. */}
-                      <span
-                        className="relative grid place-items-center"
-                        style={{ transform: 'translate(-0.5px, -0.5px)' }}
-                      >
-                        {/* ArrowDown, not ChevronDown — this file already
-                            uses a plain ChevronDown for an unrelated
-                            expand/collapse accordion affordance (~line 8397),
-                            so reusing it here for "jump to latest" would
-                            collide with that established meaning. A caret
-                            reads as "expand/more options"; a stemmed arrow
-                            reads unambiguously as "scroll/jump to end" even
-                            at this button's small (14px) render size, where
-                            the previously-used double-chevron (ChevronsDown)
-                            visually compressed into what looked like a single
-                            plain arrow anyway — confirmed live via
-                            screenshot. */}
-                        <ArrowDown className="h-3.5 w-3.5" strokeWidth={2} />
-                      </span>
-                    </motion.button>
-                  )}
-                </AnimatePresence>
-                <div
-                  className={`flex flex-wrap justify-center items-center gap-1.5 px-4 pb-3 max-w-full overflow-visible ${rollingTranscript && showTranscript ? 'pt-1' : 'pt-3'}`}
-                >
-                <button
-                  onClick={handleWhatToSay}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  <Pencil className="w-3 h-3 opacity-70" /> {t('What to answer?')}
-                </button>
-                <button
-                  onClick={handleClarify}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  <MessageSquare className="w-3 h-3 opacity-70" /> {t('Clarify')}
-                </button>
-                <button
-                  onClick={actionButtonMode === 'brainstorm' ? handleBrainstorm : handleRecap}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  {actionButtonMode === 'brainstorm' ? (
-                    <>
-                      <Lightbulb className="w-3 h-3 opacity-70" /> {t('Brainstorm')}
-                    </>
-                  ) : (
-                    <>
-                      <RefreshCw className="w-3 h-3 opacity-70" /> {t('Recap')}
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={handleFollowUpQuestions}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  <HelpCircle className="w-3 h-3 opacity-70" /> {t('Follow Up Question')}
-                </button>
-                <button
-                  onClick={handleAnswerNow}
-                  className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${
-                    isManualRecording
-                      ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20'
-                      : 'overlay-chip-surface overlay-text-interactive'
-                  }`}
-                  style={isManualRecording ? undefined : appearance.chipStyle}
-                >
-                  {isManualRecording ? (
-                    <>
-                      <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                      {t('Stop')}
-                    </>
-                  ) : (
-                    <>
-                      <Zap className="w-3 h-3 opacity-70" /> {t('Answer')}
-                    </>
-                  )}
-                </button>
-                </div>
-              </div>
-
-              {/* Input Area */}
-              <div className="p-3 pt-0">
-                {/* Latent Context Preview (Attached Screenshot) */}
-                {attachedContext.length > 0 && (
-                  <div
-                    className={`mb-2 rounded-lg p-2 transition-all duration-200 border ${subtleSurfaceClass}`}
-                    style={appearance.subtleStyle}
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-medium overlay-text-primary">
-                        {attachedContext.length} screenshot{attachedContext.length > 1 ? 's' : ''}{' '}
-                        attached
-                      </span>
-                      <button
-                        onClick={() => setAttachedContext([])}
-                        className="p-1 rounded-full transition-colors overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
-                        title={t("Remove all")}
-                        style={appearance.iconStyle}
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="flex gap-1.5 overflow-x-auto max-w-full pb-1">
-                      {attachedContext.map((ctx, idx) => (
-                        <div key={ctx.path} className="relative group/thumb flex-shrink-0">
-                          <img
-                            src={ctx.preview}
-                            alt={`Screenshot ${idx + 1}`}
-                            className={`h-12 w-auto rounded-[10px] border object-cover shadow-sm ${isLightTheme ? 'border-black/15' : 'border-white/20'}`}
-                          />
-                          <button
-                            onClick={() =>
-                              setAttachedContext((prev) => prev.filter((_, i) => i !== idx))
-                            }
-                            className="absolute -top-1 -right-1 w-4 h-4 bg-red-500/80 hover:bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover/thumb:opacity-100 transition-opacity"
-                            title={t("Remove")}
-                          >
-                            <X className="w-2.5 h-2.5 text-white" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <span className="text-[10px] overlay-text-muted">
-                      {t('Ask a question or click Answer')}
-                    </span>
-                  </div>
-                )}
-
-                {/* Stealth hotkey conflict banner — shown if globalShortcut.register()
-                                    failed for chat:focusInput (typically because the configured
-                                    activation hotkey is already claimed by another app or by the
-                                    OS). Click-to-activate still works (mousedown listener is
-                                    independent of the hotkey), but the user can rebind in Settings. */}
-                {stealthHotkeyConflict && (
-                  <div
-                    className="mb-2 px-3 py-2 rounded-xl border border-rose-400/40 bg-rose-500/10 text-[11px] flex items-center gap-2"
-                    data-stealth-ignore="true"
-                  >
-                    <span className="overlay-text-primary flex-1">
-                      {t('Stealth typing hotkey')}{' '}
-                      <kbd className="px-1 py-0.5 rounded bg-white/10 font-mono text-[10px]">
-                        {stealthHotkeyConflict}
-                      </kbd>{' '}
-                      {t('is already in use. Click the input to activate, or rebind in Settings.')}
-                    </span>
-                    <button
-                      onClick={() => window.electronAPI.openSettingsTab('keybinds')}
-                      className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 transition-colors text-[11px] font-medium overlay-text-primary whitespace-nowrap"
-                      data-stealth-ignore="true"
-                    >
-                      {t('Rebind')}
-                    </button>
-                    <button
-                      onClick={() => setStealthHotkeyConflict(null)}
-                      className="px-1.5 py-1 rounded-md hover:bg-white/10 transition-colors text-[11px] overlay-text-muted"
-                      aria-label={t("Dismiss")}
-                      data-stealth-ignore="true"
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
-
-                {/* Stealth tap permission banner — shown only when the user
-                                    pressed the activation hotkey but Accessibility wasn't
-                                    granted. macOS-only: Accessibility is a TCC concept that
-                                    doesn't exist on Windows, and the underlying CGEventTap
-                                    Rust module ships only in the Darwin binary. Gating here
-                                    is belt-and-suspenders on top of the native-side gate. */}
-                {isMac && stealthPermissionMissing && (
-                  <OverlayBanner
-                    className="mb-2"
-                    data-stealth-ignore="true"
-                    /*
-                      Unified onto the same primitive as the system-audio
-                      banner above: same surface, radius, padding, type ramp,
-                      icon chip, primary/secondary button pair and inline ✕.
-                      Previously this was a second design for the same job
-                      (bare sentence + three flat amber buttons + a "×" glyph).
-                      The heading is new; the sentence below it is byte-for-byte
-                      the existing key, which has shipped ja/ru translations.
-                    */
-                    title={t('Accessibility Access Needed')}
-                    message={t('Stealth typing needs Accessibility access. Grant it in System Settings, then restart Natively.')}
-                    onDismiss={() => setStealthPermissionMissing(false)}
-                    dismissLabel={t('Dismiss')}
-                    dismissButtonProps={{ 'data-stealth-ignore': 'true' }}
-                    actions={
-                      <>
-                        <OverlayBannerButton
-                          variant="primary"
-                          onClick={() => window.electronAPI.stealthTapOpenSettings()}
-                          title={t('Open macOS Accessibility privacy settings')}
-                          data-stealth-ignore="true"
-                        >
-                          {t('Open Settings')}
-                        </OverlayBannerButton>
-                        <OverlayBannerButton
-                          variant="secondary"
-                          onClick={async () => {
-                            if (appRestarting) return; // in-flight guard
-                            setAppRestarting(true);
-                            try {
-                              await window.electronAPI?.restartApp?.();
-                            } catch (err) {
-                              console.warn('[UI] restart-app failed:', err);
-                              setAppRestarting(false);
-                            }
-                          }}
-                          disabled={appRestarting}
-                          aria-busy={appRestarting}
-                          data-stealth-ignore="true"
-                          title={t('Accessibility grants often need a full app restart to take effect')}
-                        >
-                          {appRestarting ? t('Restarting…') : t('Restart Now')}
-                        </OverlayBannerButton>
-                      </>
-                    }
-                  />
-                )}
-
-                {/* data-stealth-engage marks this subtree as
-                                    the ONLY clickable region that engages the
-                                    CGEventTap. See the click-to-activate
-                                    useEffect (~line 2840) for the opt-IN
-                                    rationale — buttons elsewhere in the
-                                    overlay no longer accidentally engage the
-                                    tap and break inputs in Settings/Model
-                                    Selector windows. */}
-                <div className="relative group" data-stealth-engage="true">
-                  <input
-                    ref={textInputRef}
-                    data-testid="overlay-chat-input"
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => { setInputValue(e.target.value); setSkillPickerIndex(0); }}
-                    onKeyDown={(e) => {
-                      if (filteredSkills.length > 0 && skillPickerQuery !== null) {
-                        if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          setSkillPickerIndex((i) => Math.max(0, i - 1));
-                          return;
-                        }
-                        if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          setSkillPickerIndex((i) => Math.min(filteredSkills.length - 1, i + 1));
-                          return;
-                        }
-                        if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setInputValue('');
-                          return;
-                        }
-                        if (e.key === 'Tab' || (e.key === 'Enter' && !e.repeat)) {
-                          e.preventDefault();
-                          selectSkill(filteredSkills[clampedPickerIndex]);
-                          return;
-                        }
-                      }
-                      if (e.key !== 'Enter' || e.repeat) return;
-                      // Cmd/Ctrl+Enter belongs to general:process-screenshots.
-                      // Let it bubble to the window keydown handler instead of
-                      // submitting — handleManualSubmit silently returns on an
-                      // empty input, which is why the shortcut appeared dead.
-                      if (e.metaKey || e.ctrlKey) return;
-                      e.preventDefault();
-                      handleManualSubmit();
-                    }}
-                    // Block native DOM focus on click — the panel becoming
-                    // key window is exactly the signal coding-interview
-                    // platforms watch for via window.onblur on the parent.
-                    // mousedown listener (capture phase) already engaged
-                    // the CGEventTap, so typing routes through that path.
-                    onMouseDown={blockInputFocus}
-                    readOnly={stealthTapActive}
-                    // Engaged-session appearance. On macOS the input takes real
-                    // DOM focus on click (the panel can hold key focus without
-                    // activating), so it shows the aurora glow and the green
-                    // ring only appears in the explicitly hotkey-engaged tap
-                    // mode. Windows can never focus this input — doing so would
-                    // steal the meeting app's foreground — so it would otherwise
-                    // sit permanently unfocused-looking AND permanently green,
-                    // since every click there engages the stealth hook. Drive
-                    // the same aurora glow with a class instead, and drop the
-                    // green, so both platforms look identical on click.
-                    className={`w-full border rounded-xl pl-3 pr-10 py-2.5 text-[13px] leading-relaxed ${inputClass} ${stealthTapActive && isWindows ? 'aurora-focus-active' : ''} ${stealthTapActive && !isWindows ? 'ring-2 ring-emerald-400/30 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.15)]' : ''}`}
-                    style={appearance.inputStyle}
-                  />
-
-                  {/* Skill picker — portal so it escapes the overflow-hidden shell */}
-                  {filteredSkills.length > 0 && skillPickerQuery !== null &&
-                    createPortal(
-                      <SkillPicker
-                        skills={filteredSkills}
-                        selectedIndex={clampedPickerIndex}
-                        anchorEl={textInputRef.current}
-                        onSelect={selectSkill}
-                      />,
-                      document.body,
-                    )
-                  }
-
-                  {/* Custom Rich Placeholder */}
-                  {!inputValue && (
-                    <div className="absolute inset-x-3 top-1/2 -translate-y-1/2 min-w-0 overflow-hidden whitespace-nowrap pointer-events-none text-[13px] overlay-text-muted">
-                      <span className="overlay-input-placeholder-full inline-flex items-center gap-1.5">
-                        <span>{t('Ask anything on screen or conversation, or')}</span>
-                      <span className="flex items-center gap-1 opacity-80">
-                        {(
-                          shortcuts.selectiveScreenshot || [getModifierSymbol('cmd'), 'Shift', 'H']
-                        ).map((key, i) => (
-                          <React.Fragment key={i}>
-                            {i > 0 && <span className="text-[10px]">+</span>}
-                            <kbd
-                              className="px-1.5 py-0.5 rounded border text-[10px] font-sans min-w-[20px] text-center overlay-control-surface overlay-text-secondary"
-                              style={appearance.controlStyle}
-                            >
-                              {key}
-                            </kbd>
-                          </React.Fragment>
-                        ))}
-                      </span>
-                      <span>{t('for selective screenshot')}</span>
-                      </span>
-                      <span className="overlay-input-placeholder-compact">{t('Ask anything…')}</span>
-                    </div>
-                  )}
-
-                  {!inputValue && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 pointer-events-none opacity-20">
-                      <span className="text-[10px]">↵</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Bottom Row. pointer-events-none on the ROW: it is a full-width,
-                    30px box at z-[60], above the resize handles (z-50), so its
-                    empty span shadowed the south handle's top and the corner. Only
-                    its controls take the pointer. */}
-                <div className="flex items-center justify-between mt-3 px-0.5 relative z-[60] pointer-events-none [&>*]:pointer-events-auto">
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      data-model-selector-toggle="true"
-                      onClick={(e) => {
-                        // Calculate position for detached window
-                        if (!contentRef.current) return;
-                        const contentRect = contentRef.current.getBoundingClientRect();
-                        const buttonRect = e.currentTarget.getBoundingClientRect();
-                        const GAP = 8;
-
-                        const x = window.screenX + buttonRect.left;
-                        const y = window.screenY + contentRect.bottom + GAP;
-
-                        window.electronAPI.toggleModelSelector({ x, y, activate: false });
-                      }}
-                      className={`
-                                                flex items-center gap-2 px-3 py-1.5
-                                                border rounded-lg transition-colors
-                                                text-xs font-medium w-[140px]
-                                                interaction-base interaction-press
-                                                ${controlSurfaceClass}
-                                            `}
-                      style={appearance.controlStyle}
-                    >
-                      <span className="truncate min-w-0 flex-1">
-                        {(() => {
-                          const m = currentModel;
-                          const codexCliName = getCodexCliModelDisplayName(m);
-                          if (codexCliName) return codexCliName;
-                          if (m.startsWith('ollama-')) return m.replace('ollama-', '');
-                          // LiteLLM ids carry two prefixes — ours and the proxy's
-                          // upstream — so the raw id reads `litellm/openai/gpt-4o`.
-                          // This MUST sit above the displayName branch below:
-                          // getCurrentModelDisplayName() returns currentModelId
-                          // verbatim for LiteLLM, so that path would render the
-                          // full id and this chip is a 140px truncating control.
-                          if (m.startsWith('litellm/')) return litellmModelLabel(m);
-                          // For everything else, prefer the authoritative
-                          // displayName from `getCurrentLlmConfig` (handles
-                          // custom-provider UUIDs and any future model aliases
-                          // without each consumer needing its own resolver).
-                          // Falls back to the raw identifier if the IPC has
-                          // not yet resolved.
-                          if (currentModelDisplayName && currentModelDisplayName !== m) {
-                            return currentModelDisplayName;
-                          }
-                          if (m === 'gemini-3.8-flash') return 'Gemini 3.8 Flash';
-                          // Legacy ids, still valid and still selectable from
-                          // persisted state — name them instead of showing the slug.
-                          if (m === 'gemini-3.7-flash') return 'Gemini 3.7 Flash';
-                          if (m === 'gemini-3.6-flash') return 'Gemini 3.6 Flash';
-                          if (m === 'gemini-3.1-flash-lite') return 'Gemini 3.1 Flash Lite';
-                          if (m === 'gemini-3.1-pro-preview') return 'Gemini 3.1 Pro';
-                          if (m === 'qwen/qwen3.6-27b') return 'Groq Qwen 3.6';
-                          if (m === 'openai/gpt-oss-120b') return 'Groq GPT-OSS 120B';
-                          if (m === 'openai/gpt-oss-20b') return 'Groq GPT-OSS 20B';
-                          if (m === 'gpt-5.4') return 'GPT 5.4';
-                          if (m === 'claude-sonnet-4-6') return 'Sonnet 4.6';
-                          return m;
-                        })()}
-                      </span>
-                      <ChevronDown size={14} className="shrink-0 transition-transform" />
-                    </button>
-
-                    {directAssistEnabled && (
-                      <span
-                        className="px-1.5 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide text-emerald-300 bg-emerald-400/10 border border-emerald-400/20"
-                        title={t('Direct Assist sends the current request straight to the active model')}
-                        data-testid="direct-assist-badge"
-                      >
-                        {t('Direct')}
-                      </span>
-                    )}
-
-                    <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
-
-                    <div className="relative">
-                      <button
-                        data-settings-toggle="true"
-                        onClick={(e) => {
-                          if (isSettingsOpen) {
-                            // If open, just close it (toggle will handle logic but we can be explicit or just toggle)
-                            // Actually toggle-settings-window handles hiding if visible, so logic is same.
-                            window.electronAPI.toggleSettingsWindow();
-                            return;
-                          }
-
-                          if (!contentRef.current) return;
-
-                          const contentRect = contentRef.current.getBoundingClientRect();
-                          const buttonRect = e.currentTarget.getBoundingClientRect();
-                          const POPUP_WIDTH = 270; // Matches SettingsWindowHelper actual width
-                          const GAP = 8; // Same gap as between TopPill and main body (gap-2 = 8px)
-
-                          // X: Left-aligned relative to the Settings Button
-                          const x = window.screenX + buttonRect.left;
-
-                          // Y: Below the main content + gap
-                          const y = window.screenY + contentRect.bottom + GAP;
-
-                          window.electronAPI.toggleSettingsWindow({ x, y });
-                        }}
-                        className={`
-                                            w-7 h-7 flex items-center justify-center rounded-lg
-                                            interaction-base interaction-press
-                                            ${
-                                              isSettingsOpen
-                                                ? 'overlay-icon-surface overlay-icon-surface-hover overlay-text-primary'
-                                                : 'overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive'
-                                            }
-                                        `}
-                        style={appearance.iconStyle}
-                      >
-                        <SlidersHorizontal className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Mouse Passthrough Toggle */}
-                    <div className="relative">
-                      <button
-                        onClick={() => {
-                          const newState = !isMousePassthrough;
-                          setIsMousePassthrough(newState);
-                          window.electronAPI?.setOverlayMousePassthrough?.(newState);
-                        }}
-                        className={`
-                                                    w-7 h-7 flex items-center justify-center rounded-lg
-                                                    interaction-base interaction-press
-                                                    ${
-                                                      isMousePassthrough
-                                                        ? 'overlay-icon-surface overlay-icon-surface-hover text-accent-primary opacity-100'
-                                                        : 'overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive'
-                                                    }
-                                                `}
-                        style={appearance.iconStyle}
-                      >
-                        <PointerOff className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleManualSubmit}
-                    disabled={!inputValue.trim()}
-                    className={`
-                                    w-7 h-7 rounded-full flex items-center justify-center
-                                    interaction-base interaction-press
-                                    ${
-                                      inputValue.trim()
-                                        ? 'bg-[#007AFF] text-white shadow-lg shadow-blue-500/20 hover:bg-[#0071E3]'
-                                        : 'overlay-icon-surface overlay-text-muted cursor-not-allowed'
-                                    }
-                                `}
-                    style={inputValue.trim() ? undefined : appearance.iconStyle}
-                  >
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
 
               {/* Resize handles. EAST-side only — see handleResizePointerDown
                   for why a west-side handle cannot be made artifact-free.

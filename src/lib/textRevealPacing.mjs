@@ -35,11 +35,22 @@
 // 400 chars/sec ≈ 100 tokens/sec (~4 chars/token) — raised from 240 (≈60
 // tok/s), itself raised from 180 and originally 120 (≈30 tok/s, the middle
 // of the 20-40 tok/s UI display-speed band), per explicit request each time.
-// Now 2.5x the upper edge of that band: at this rate a 400-character answer
-// is fully on screen in one second, so the cap only binds on genuinely fast
-// providers mid-burst and the reveal reads as "quick" rather than "paced".
-// Everything else still applies unchanged — the initial buffer, word and
-// punctuation-aware boundaries, and deferred completion.
+//
+// Briefly raised to 3000 same day ("tokens should immediately start
+// streaming instead of pasting"), then REVERTED back to 400: the higher cap
+// widens tickPacer's per-frame catch-up burst proportionally (charBudget
+// accumulates deltaMs * MAX_REVEAL_CHARS_PER_MS, spent via
+// snapRevealBoundary's word-boundary scan) — if the render thread is EVER
+// even slightly behind for any unrelated reason, the next frame's larger
+// catch-up burst costs more, which risks falling further behind, which
+// makes the NEXT burst larger still. At 400 c/s that spiral's per-frame cost
+// stays small; at 3000 it does not. This was live-diagnosed as a probable
+// contributor to the overlay freezing (window present, unresponsive to
+// clicks — the classic blocked-JS-thread signature, not a crash) reported
+// the same evening this was raised. Stability wins over reveal speed here;
+// revisit the "feels like a paste" complaint separately (e.g. narrowing the
+// gap between arrival and display some other way) only once the app is
+// confirmed stable again — do not re-raise this value speculatively.
 export const MAX_REVEAL_CHARACTERS_PER_SECOND = 400;
 export const INITIAL_BUFFER_MS = 80;
 export const INITIAL_BUFFER_CHAR_THRESHOLD = 12;
@@ -49,16 +60,19 @@ export const INITIAL_BUFFER_CHAR_THRESHOLD = 12;
 // setTimeout(1000/60) would be, and the rate-cap math below already adapts
 // to whatever deltaMs it's given.
 export const USE_ANIMATION_FRAME = true;
-// When false (the default): a stream's natural completion does NOT snap the
-// remaining backlog to full text — the reveal keeps draining at the same
-// deterministic rate all the way to the last character, so the animation
-// feels identical from the first character to the final period regardless
-// of when the network finished. When true: stream-end commits the full text
-// immediately (the v1 behavior) — useful for a future experiment/rollback
-// without code changes. NativelyInterface.tsx's finalize call sites are
-// expected to honor this flag explicitly (it is NOT auto-applied inside
-// tickPacer, which has no concept of "the provider is done").
-export const FLUSH_IMMEDIATELY_ON_COMPLETE = false;
+// Flipped to true (2026-09, latency-focused teleprompter rework): with
+// buttons removed and Auto-Answer as the only trigger, the answer is already
+// competing with STABILITY_MS's ~2s deliberate wait plus retrieval/generation
+// time — the "type it out smoothly" animation was adding ANOTHER 1-2+
+// seconds of pure display latency AFTER the model had already finished, for
+// an answer the user is actively waiting on mid-interview. When true:
+// stream-end commits the full text immediately instead of continuing to
+// drain the backlog at the capped rate. NativelyInterface.tsx's finalize
+// call sites honor this flag explicitly (it is NOT auto-applied inside
+// tickPacer, which has no concept of "the provider is done"). The reveal
+// animation still runs normally WHILE tokens are arriving — this only
+// removes the extra wait after the provider is already done.
+export const FLUSH_IMMEDIATELY_ON_COMPLETE = true;
 
 // Exposed as one object matching the shape callers may want to pass around /
 // log / tune together, per spec. The individual named exports above remain

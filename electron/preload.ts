@@ -568,6 +568,12 @@ interface ElectronAPI {
   onIntelligenceSuggestedAnswerDiscard: (
     callback: (data: { reason: string }) => void,
   ) => () => void;
+  /** Fired the moment Auto-Answer's judge approves a candidate and dispatch
+   *  starts — before the first token arrives. Lets the UI show a "Generating
+   *  answer…" state for the judge+retrieval+TTFT gap instead of looking idle. */
+  onIntelligenceAutoAnswerStarted: (
+    callback: () => void,
+  ) => () => void;
   onIntelligenceCodeVerified: (
     callback: (data: { question: string; passed: number; total: number; language: string }) => void,
   ) => () => void;
@@ -1241,6 +1247,7 @@ interface ElectronAPI {
   skillsRefresh: () => Promise<unknown[]>;
   skillsOpenFolder: () => Promise<{ success: boolean; path: string; error?: string }>;
   skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+  skillsSetEnabled: (id: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   skillsUpload: (
     payload: SkillUploadPayload,
     opts?: { autoInstall?: boolean }
@@ -1505,10 +1512,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Skills — local SKILL.md instructions surfaced in Settings and the overlay.
   skillsRefresh: () => ipcRenderer.invoke('skills:list'),
   skillsOpenFolder: () => ipcRenderer.invoke('skills:open-folder'),
-  // Per-skill management: hard-delete. Built-ins are refused inside the
-  // manager. Enable/disable is intentionally NOT exposed — users who don't
-  // want a skill delete it instead (see SkillsSettings.tsx).
+  // Per-skill management: hard-delete, and enable/disable (re-added now that
+  // skill triggering is automatic — see skills:set-enabled in ipcHandlers.ts).
   skillsDelete: (id: string) => ipcRenderer.invoke('skills:delete', id),
+  skillsSetEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('skills:set-enabled', id, enabled),
   // Skill upload — step-3 wiring. `skillsUpload` is the general call (opts.autoInstall
   // defaults to false on the renderer side; main process uses ?? false). `skillsPreview`
   // is sugar for `autoInstall: false` — the renderer's confirm step calls `skillsUpload`
@@ -1525,6 +1532,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   phoneMirrorDisable: () => ipcRenderer.invoke('phone-mirror:disable'),
   phoneMirrorSetLan: (exposeOnLan: boolean) =>
     ipcRenderer.invoke('phone-mirror:set-lan', exposeOnLan),
+  phoneMirrorSetAnswersOnly: (answersOnly: boolean) =>
+    ipcRenderer.invoke('phone-mirror:set-answers-only', answersOnly),
   phoneMirrorRotateToken: () => ipcRenderer.invoke('phone-mirror:rotate-token'),
   phoneMirrorArmExtension: () => ipcRenderer.invoke('phone-mirror:arm-extension'),
   phoneMirrorListTabs: () => ipcRenderer.invoke('phone-mirror:list-tabs'),
@@ -2108,6 +2117,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('intelligence-suggested-answer', subscription);
     return () => {
       ipcRenderer.removeListener('intelligence-suggested-answer', subscription);
+    };
+  },
+  onIntelligenceAutoAnswerStarted: (callback: () => void) => {
+    const subscription = () => callback();
+    ipcRenderer.on('intelligence-auto-answer-started', subscription);
+    return () => {
+      ipcRenderer.removeListener('intelligence-auto-answer-started', subscription);
     };
   },
   // Orphaned-scaffold fix: drop the open what-to-answer scaffold row when a
@@ -3005,6 +3021,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('mode-file-index-status', subscription);
     };
   },
+
+  // Free-tier "Interview Knowledge" (docs/specs/oss-knowledge-rag-spec.md) —
+  // deliberately separate from the modesXxx bindings above; never gated.
+  knowledgeDocAddText: (params: { title: string; content: string; collectionId?: string | null; docType?: string }) =>
+    ipcRenderer.invoke('knowledge-doc:add-text', params),
+  knowledgeDocAddFile: (params?: { collectionId?: string | null; docType?: string }) => ipcRenderer.invoke('knowledge-doc:add-file', params),
+  knowledgeDocAddFolder: (params?: { collectionId?: string | null }) => ipcRenderer.invoke('knowledge-doc:add-folder', params),
+  knowledgeDocList: (collectionId?: string | null) => ipcRenderer.invoke('knowledge-doc:list', collectionId),
+  knowledgeDocDelete: (id: string) => ipcRenderer.invoke('knowledge-doc:delete', id),
+  knowledgeDocGetStatus: (id: string) => ipcRenderer.invoke('knowledge-doc:get-status', id),
+  // Collections (companies/interviews) grouping knowledge docs — same free-tier guarantee.
+  knowledgeCollectionCreate: (params: { name: string; interviewerName?: string; contextNotes?: string }) =>
+    ipcRenderer.invoke('knowledge-collection:create', params),
+  knowledgeCollectionList: () => ipcRenderer.invoke('knowledge-collection:list'),
+  knowledgeCollectionUpdate: (id: string, updates: { name?: string; interviewerName?: string | null; contextNotes?: string | null }) =>
+    ipcRenderer.invoke('knowledge-collection:update', id, updates),
+  knowledgeCollectionDelete: (id: string) => ipcRenderer.invoke('knowledge-collection:delete', id),
+  knowledgeCollectionGetActive: () => ipcRenderer.invoke('knowledge-collection:get-active'),
+  knowledgeCollectionSetActive: (id: string | null) => ipcRenderer.invoke('knowledge-collection:set-active', id),
   knowledgeListPacks: (modeId: string) => ipcRenderer.invoke('knowledge:list-packs', modeId),
   knowledgeGetPack: (fileId: string) => ipcRenderer.invoke('knowledge:get-pack', fileId),
   knowledgeRegeneratePack: (params: { fileId: string; modeId: string; fileName: string }) =>

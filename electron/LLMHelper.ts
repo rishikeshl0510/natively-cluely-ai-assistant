@@ -513,6 +513,22 @@ export class LLMHelper {
   private groqFastTextMode: boolean = false;
   private codexCliConfig: CodexCliConfig = DEFAULT_CODEX_CLI_CONFIG;
   private knowledgeOrchestrator: any = null;
+  /**
+   * Citations for the MOST RECENT Interview Knowledge-grounded answer
+   * (docs/specs/oss-knowledge-rag-spec.md) — set right before the answer is
+   * generated in chatWithGemini/_streamChatInner, read by the IPC layer right
+   * after the answer completes so it can attach "Sources" to the response
+   * sent to the renderer. Null when no Interview Knowledge docs exist or none
+   * were retrieved for this turn. Single-slot, not per-request-id: correct
+   * for this app's single-flight manual/streaming chat (a second concurrent
+   * chat call is superseded, not interleaved — see _chatStreamsBySender in
+   * ipcHandlers.ts), same assumption every other "last X" field on this class
+   * already makes (lastProviderModel, etc.).
+   */
+  private lastInterviewKnowledgeCitations: Array<{ sourceId: string; fileName: string; text: string }> | null = null;
+  public getLastInterviewKnowledgeCitations(): Array<{ sourceId: string; fileName: string; text: string }> | null {
+    return this.lastInterviewKnowledgeCitations;
+  }
   private negotiationCoachingHandler: ((payload: unknown) => void) | null = null;
   private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
@@ -3492,6 +3508,42 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         } catch (groundedErr: any) {
           console.warn('[LLMHelper] Document-grounded manual retrieval failed, proceeding without:', groundedErr.message);
         }
+      }
+      // Free-tier "Interview Knowledge" context (docs/specs/oss-knowledge-rag-spec.md).
+      // Additive and INDEPENDENT of the Modes document-grounding contract above —
+      // runs in any mode, including default General, gated only on whether the
+      // user has added any knowledge docs through the separate knowledge-doc:*
+      // IPC surface. Never touches isProOrTrialActive() or the Modes reference-
+      // file system (electron/services/interviewKnowledge/InterviewKnowledgeRetriever.ts).
+      try {
+        const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+        const ikRetriever = InterviewKnowledgeRetriever.getInstance();
+        if (ikRetriever.hasAnyDocs()) {
+          const hybrid = ikRetriever.getHybridRetriever();
+          if (hybrid) {
+            await ikRetriever.ensureAllIndexed();
+            const { retrieveWithAgenticLoop } = require('./services/interviewKnowledge/agenticRetrieve');
+            // maxRounds:3 — this is the manual/typed chat path, not racing a
+            // live-answer deadline, so the spec's live-path bound of 2 doesn't
+            // apply here (see agenticRetrieve.ts's header comment).
+            const ikResult = await retrieveWithAgenticLoop({
+              question: message,
+              files: ikRetriever.getReferenceFiles(),
+              retriever: hybrid,
+              maxRounds: 3,
+              docTypeById: ikRetriever.getDocTypeMap(),
+            });
+            if (ikResult.formattedContext && ikResult.formattedContext.trim()) {
+              const tagged = `[Interview Knowledge]\n${ikResult.formattedContext}`;
+              context = context ? `${tagged}\n\n${context}` : tagged;
+            }
+            this.lastInterviewKnowledgeCitations = ikResult.chunks.map((c: { sourceId: string; fileName: string; text: string }) => ({ sourceId: c.sourceId, fileName: c.fileName, text: c.text }));
+          }
+        } else {
+          this.lastInterviewKnowledgeCitations = null;
+        }
+      } catch (ikErr: any) {
+        console.warn('[LLMHelper] Interview Knowledge retrieval failed, proceeding without:', ikErr?.message || ikErr);
       }
       // R6: knowledge suppression reads the STRICT flag (Defect C doctrine —
       // same as the manual streaming path at ~5448 and the WTA engine). The
@@ -6831,8 +6883,10 @@ let isMultimodal = !!(imagePaths?.length);
         // a different mode's documents into an answer scoped to the first).
         const pin = routeOptions?.pinnedModeId ?? undefined;
         const groundingInfo = mm.getActiveModeDocumentGroundingInfo?.(pin);
+        _stage('doc-grounded retrieval START');
         const groundedContext = await mm
           .buildRetrievedActiveModeContextBlockHybrid(message, undefined, undefined, undefined, true, pin);
+        _stage('doc-grounded retrieval DONE');
         if (groundedContext && groundedContext.trim()) {
           const tagged = groundingInfo
             ? `[Document-grounded mode: ${groundingInfo.modeName}]\n${groundedContext}`
@@ -6842,6 +6896,88 @@ let isMultimodal = !!(imagePaths?.length);
       } catch (groundedErr: any) {
         console.warn('[LLMHelper.stream] Document-grounded manual retrieval failed, proceeding without:', groundedErr.message);
       }
+    }
+    // Free-tier "Interview Knowledge" context (docs/specs/oss-knowledge-rag-spec.md),
+    // streaming-path counterpart of the same block in chatWithGemini above. This
+    // is the path the overlay's typed chat input actually streams through, so
+    // without this mirror the feature would never reach the UI the user tests
+    // against, even though it works correctly from the non-streaming entry point.
+    // Additive and INDEPENDENT of the Modes document-grounding contract above —
+    // gated only on whether the user has added any knowledge docs.
+    try {
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      const ikRetriever = InterviewKnowledgeRetriever.getInstance();
+      _stage('interview-knowledge check START');
+      if (ikRetriever.hasAnyDocs()) {
+        // Latency fix (2026-09, confirmed by MEASURE_LATENCY trace data): a
+        // per-turn agentic retrieval result gets injected into `context`,
+        // which is NEVER cached — every single WTA turn paid fresh prefill
+        // for it regardless of the (working) system-prompt cache. For "the
+        // set of documents needed for THIS interview" (one knowledge
+        // collection — resume + JD + notes), that set doesn't change
+        // question to question, so when it's small enough to be worth
+        // caching wholesale, fold the WHOLE corpus into `systemPromptOverride`
+        // (the CACHED portion) once, and skip per-turn retrieval entirely —
+        // no more fresh reprocessing of the same content on every turn.
+        // Above the cap, fall back to the existing smart per-turn retrieval
+        // unchanged, so a large knowledge library keeps working as before.
+        const CACHEABLE_CORPUS_MAX_CHARS = 60_000;
+        const fullCorpus = ikRetriever.getFullCorpusText();
+        if (fullCorpus && fullCorpus.length <= CACHEABLE_CORPUS_MAX_CHARS) {
+          const tagged = `[Interview Knowledge — full document set for this interview]\n${fullCorpus}`;
+          systemPromptOverride = systemPromptOverride ? `${systemPromptOverride}\n\n${tagged}` : tagged;
+          // Citations don't apply here — the model saw the whole document,
+          // not a set of retrieved/cited chunks. Clear any stale value from
+          // a previous (large-corpus, retrieval-path) turn.
+          this.lastInterviewKnowledgeCitations = null;
+          _stage(`interview-knowledge DONE (cached corpus, ${fullCorpus.length}c)`);
+        } else {
+          const hybrid = ikRetriever.getHybridRetriever();
+          if (hybrid) {
+            // Never block a live turn on indexing (2026-09, "should not embed
+            // during the call"): this used to `await` here, and a live trace
+            // showed it costing 6.5s of a live answer's latency when the
+            // embedding space had gone stale mid-session — indexing is
+            // exactly the kind of work that must happen in the background,
+            // not in the critical path of a question someone is waiting on.
+            // Fire-and-forget instead: this turn's retrieval below runs
+            // against whatever is ALREADY indexed (a doc added seconds ago
+            // may be briefly missing from results), and the kicked-off
+            // indexing pass makes the NEXT turn better. The proactive
+            // background kick at app startup (main.ts) already covers the
+            // common case of the whole corpus being stale on launch; this
+            // is the same principle applied per-turn instead of relying on
+            // the startup kick alone.
+            _stage('interview-knowledge ensureAllIndexed kicked (background, not awaited)');
+            ikRetriever.ensureAllIndexed().catch((err: any) => {
+              console.warn('[LLMHelper.stream] Background interview-knowledge ensureAllIndexed failed (non-fatal):', err?.message || err);
+            });
+            const { retrieveWithAgenticLoop } = require('./services/interviewKnowledge/agenticRetrieve');
+            // maxRounds:2 (the live-path bound, not the manual-chat 3) — this
+            // path streams into the live overlay, closer to a live answer than
+            // a background Settings-panel chat.
+            const ikResult = await retrieveWithAgenticLoop({
+              question: message,
+              files: ikRetriever.getReferenceFiles(),
+              retriever: hybrid,
+              maxRounds: 2,
+              docTypeById: ikRetriever.getDocTypeMap(),
+            });
+            _stage(`interview-knowledge retrieveWithAgenticLoop DONE (rounds=${ikResult.rounds}, chunks=${ikResult.chunks.length})`);
+            if (ikResult.formattedContext && ikResult.formattedContext.trim()) {
+              const tagged = `[Interview Knowledge]\n${ikResult.formattedContext}`;
+              context = context ? `${tagged}\n\n${context}` : tagged;
+            }
+            this.lastInterviewKnowledgeCitations = ikResult.chunks.map((c: { sourceId: string; fileName: string; text: string }) => ({ sourceId: c.sourceId, fileName: c.fileName, text: c.text }));
+          }
+        }
+      } else {
+        this.lastInterviewKnowledgeCitations = null;
+        _stage('interview-knowledge SKIP (no docs)');
+      }
+    } catch (ikErr: any) {
+      _stage(`interview-knowledge FAILED: ${ikErr?.message || ikErr}`);
+      console.warn('[LLMHelper.stream] Interview Knowledge retrieval failed, proceeding without:', ikErr?.message || ikErr);
     }
     if (shouldRunKnowledge) {
       try {

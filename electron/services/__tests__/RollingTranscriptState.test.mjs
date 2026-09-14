@@ -63,6 +63,39 @@ test('final replaces prefix-matching in-progress partial', () => {
   assert.equal(bar, 'hello world');
 });
 
+// ── Silence must never erase already-displayed transcript text ───────────────
+// A period of silence (or the STT provider's own silence-skip) means no new
+// speech text arrives — it must NEVER mean the bar reverts to something
+// shorter than what was already shown. Both merge functions guard on this
+// via `if (!text) return prev` before touching anything else.
+test('an empty partial during silence leaves already-committed text untouched', () => {
+  let bar = mergeRollingTranscriptPartial('', 'hello world');
+  bar = mergeRollingTranscriptFinal(bar, 'hello world');
+  assert.equal(bar, 'hello world');
+  // Simulate a silence-period update carrying no text at all.
+  bar = mergeRollingTranscriptPartial(bar, '');
+  assert.equal(bar, 'hello world', 'empty partial must not erase committed text');
+  bar = mergeRollingTranscriptPartial(bar, '   ');
+  assert.equal(bar, 'hello world', 'whitespace-only partial must not erase committed text');
+});
+
+test('an empty final during silence leaves already-committed text untouched', () => {
+  let bar = mergeRollingTranscriptPartial('', 'hello world');
+  bar = mergeRollingTranscriptFinal(bar, 'hello world');
+  bar = mergeRollingTranscriptFinal(bar, '');
+  assert.equal(bar, 'hello world', 'empty final must not erase committed text');
+});
+
+test('multiple committed segments survive an intervening silent update', () => {
+  let bar = mergeRollingTranscriptPartial('', 'first');
+  bar = mergeRollingTranscriptFinal(bar, 'first segment');
+  bar = mergeRollingTranscriptPartial(bar, ''); // silence in between
+  bar = mergeRollingTranscriptPartial(bar, 'second');
+  bar = mergeRollingTranscriptFinal(bar, 'second segment');
+  assert.equal(bar, 'first segment  ·  second segment',
+    'a silent gap between two utterances must not drop the first one');
+});
+
 // ── Bounded rolling transcript (audit finding #7) ─────────────────────────────
 
 test('capRollingTranscript leaves a within-budget string unchanged', () => {

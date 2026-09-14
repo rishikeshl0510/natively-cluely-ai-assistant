@@ -134,7 +134,14 @@ export type AutoAnswerSkipReason =
     | 'already_answered'
     | 'engine_busy_or_cooling'
     | 'pending_expired'
-    | 'pending_superseded';
+    | 'pending_superseded'
+    // Circuit breaker (2026-09, disaster-recovery safety net — see
+    // SimpleAutoAnswer.ts's CIRCUIT_BREAKER_* constants): 'open' is a
+    // dispatch dropped while a previously-tripped breaker is still cooling
+    // down; 'tripped' is the one dispatch that itself crossed the threshold
+    // and caused the breaker to open.
+    | 'circuit_breaker_open'
+    | 'circuit_breaker_tripped';
 
 /** The ternary policy output (V3 Amendment 4) plus the orthogonal V2 actions. */
 export type AutoAnswerPolicyAction = 'auto' | 'offer' | 'silent' | 'wait' | 'speculate' | 'queue';

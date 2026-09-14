@@ -1,0 +1,19 @@
+{
+  "name": "natively-interview-knowledge-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local MCP server that lets any MCP client (Claude Desktop, Claude Code, etc.) add companies and documents into Natively's free-tier Interview Knowledge base. Deliberately its own package with its own node_modules — the main app's better-sqlite3 build is rebuilt against Electron's ABI (see scripts/rebuild-native-electron.js), which is NOT compatible with a plain `node` process. This package installs its own plain-Node build instead, so the two never conflict.",
+  "type": "module",
+  "main": "index.mjs",
+  "bin": {
+    "natively-interview-knowledge-mcp": "index.mjs"
+  },
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^12.11.1",
+    "zod": "^4.4.3"
+  }
+}

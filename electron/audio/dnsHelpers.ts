@@ -82,6 +82,15 @@ export const ipv4OnlyLookup = (hostname: string, options: any, callback?: any): 
  *                                    handshake before giving up; without this
  *                                    a stuck handshake hangs on the kernel TCP
  *                                    keepalive timer, which can be minutes)
+ *
+ * RULED OUT (2026-09-14) as the cause of the ~15.5s ElevenLabsStreamingSTT
+ * "Closed: code=1000" recycle seen in live traces: temporarily raised to
+ * 120_000 as a direct test, and connectionAgeMs on the very next close was
+ * STILL ~15.5s (15457ms), unchanged. Confirms `ws`'s own documented behavior
+ * (node_modules/ws/lib/websocket.js:247, socket.setTimeout(0) on 'open') —
+ * this genuinely has no effect past the handshake. Reverted to 15_000; the
+ * real cause of the recycle is still open and is NOT this option. See
+ * ElevenLabsStreamingSTT.ts's 'close' handler comment for current status.
  */
 export function streamingStttWsOptions(extra?: Record<string, unknown>): Record<string, unknown> {
     return {

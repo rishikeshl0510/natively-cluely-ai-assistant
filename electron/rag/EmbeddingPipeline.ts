@@ -22,8 +22,31 @@ const EMBED_TIMEOUT_MS = 30_000;
 // A QUERY embedding sits on the live answer path (2026-09-07): a hosted
 // embedder that stalled for 12.5s held the whole turn, and the caller's
 // lexical fallback never fired because the call eventually succeeded. Ingest
-// keeps the 30s budget; a query gets 3s and then lexical retrieval answers.
-const QUERY_EMBED_TIMEOUT_MS = 3_000;
+// keeps the 30s budget; a query gets a fast, hard-capped budget and then
+// lexical retrieval answers.
+// Cut to 500ms flat, zero retries (2026-09, live-latency fix, explicit "500ms
+// should be the worst case" direction): the query-path retry logic below
+// (T13/RC12) used to add up to 2 retries with multi-second backoff ON TOP of
+// a 3s-per-attempt timeout — worst case ~13s of pure dead time on the live
+// answer path, for a lookup that may find nothing anyway (measured directly
+// via a MEASURE_LATENCY trace showing a live-turn stall matching that exact
+// math — a slow/contended local Ollama embedder).
+//
+// Raised 500 -> 900 (same night, live trace with a HEALTHY key pool —
+// key pool health: 100%, no auth failures — still hit "timed out after
+// 500ms" on essentially every single call, 500-516ms each time). A clean
+// timeout (not an error) at a healthy key means the real round-trip is
+// consistently just over 500ms for this network/provider pair — so 500ms
+// was strictly worse than useless: every query paid the full 500ms tax AND
+// got zero semantic-search benefit (100% degrade rate to lexical-only), and
+// worse, 5 consecutive timeouts trigger PROMOTING local — which then fails
+// outright ("insufficient available memory (<2GB) — skipping local embedder
+// load"), so the live path got stuck fully broken instead of gracefully
+// degraded until a recovery check fires. 900ms gives real Gemini calls
+// enough room to actually complete most of the time — trading a few hundred
+// ms of worst-case latency for semantic search actually working, instead of
+// a tighter cap that only ever bought a guaranteed miss.
+const QUERY_EMBED_TIMEOUT_MS = 900;
 
 // ── T13 / RC12: query-path hysteresis (2026-08-28) ──────────────────────────
 //
@@ -42,8 +65,36 @@ const QUERY_EMBED_TIMEOUT_MS = 3_000;
 //
 // The ordering is the point: retry the PRIMARY in place first, and only after
 // sustained failure consider a fallback that costs the session its space.
-const QUERY_RETRY_ATTEMPTS = 2;
-const QUERY_RETRY_BACKOFF_MS = [1_000, 3_000];
+//
+// Cut to ZERO retries (2026-09, live-latency fix, explicit "500ms should be
+// the worst case" direction): the OLD worst case — 3 attempts x 3s timeout
+// plus two multi-second backoffs — was ~13s of dead time on a live answer
+// turn. Even the first-pass fix (1 retry, shorter backoff) still left a
+// timeout-then-wait-then-timeout CHAIN on the critical path, which is
+// incompatible with "500ms is the worst case": any retry-with-backoff
+// necessarily makes the worst case a multiple of the per-attempt timeout,
+// not the timeout itself. So: one attempt, hard-capped at
+// QUERY_EMBED_TIMEOUT_MS, then straight to per-turn degrade (see
+// noteQueryHardFailure below) — no in-call retry left to stack. The original
+// resilience concern this section was written for (don't flip the session's
+// embedding space on one transient blip) is still intact: a single failed
+// attempt degrades ONLY this turn to lexical-only ("DEGRADE THIS TURN, DON'T
+// FLIP THE SESSION" below) — it takes several separate TURNS failing in a
+// row (PROMOTE_AFTER_CONSECUTIVE_FAILURES) to actually promote a fallback
+// provider, which is unaffected by removing the in-call retry.
+const QUERY_RETRY_ATTEMPTS = 0;
+const QUERY_RETRY_BACKOFF_MS: number[] = [];
+// getEmbeddingsWithFallback() (document INDEXING, not the live query path)
+// deliberately reuses this file's shared hard-failure streak counter with the
+// query path — see its own comment below for why ("the same outage... two
+// independent counters would each need five failures to agree on one fact").
+// It must NOT reuse the query path's retry COUNT/backoff though: indexing is
+// a background operation with no live user waiting on it, so cutting its
+// retries to 0 to satisfy the live path's "500ms worst case" would trade
+// away real resilience it doesn't need to give up. Kept at the original
+// values so a reference-file upload still gets two patient retries.
+const INGEST_RETRY_ATTEMPTS = 2;
+const INGEST_RETRY_BACKOFF_MS = [1_000, 3_000];
 /** Jitter so N concurrent turns do not retry in lockstep against a rate limit. */
 const QUERY_RETRY_JITTER_MS = 250;
 /**
@@ -204,6 +255,22 @@ export class EmbeddingPipeline {
             // loading the model twice.
             if (this.provider instanceof LocalEmbeddingProvider) {
                 this.fallbackProvider = this.provider;
+                // Prewarm (2026-09, explicit request): when local is the user's
+                // CHOSEN primary (not just an emergency fallback), waiting for
+                // the model to lazy-load on the first live query means that
+                // first question eats the ONNX load time on top of everything
+                // else in the answer chain. The original lazy-load design
+                // (see the comment at the top of this method) was about NOT
+                // blocking Electron's first paint during app boot — this
+                // preserves that: it's a fire-and-forget background kick, not
+                // an awaited call, so startup is unaffected. isAvailable()
+                // is what actually triggers the transformers.js/ONNX load as
+                // a side effect (see LocalEmbeddingProvider.isAvailable).
+                this.provider.isAvailable().then((ok) => {
+                    console.log(`[EmbeddingPipeline] Local model prewarm ${ok ? 'succeeded' : 'failed (will still lazy-load on first real use)'}`);
+                }).catch((err) => {
+                    console.warn('[EmbeddingPipeline] Local model prewarm errored (non-fatal, will lazy-load on first use):', err?.message || err);
+                });
             }
 
             // Check for previous embedding-SPACE mismatches.
@@ -745,12 +812,12 @@ export class EmbeddingPipeline {
             // same outage the query path is seeing, and two independent counters
             // would each need five failures to agree on one fact.
             let primaryError: unknown = firstError;
-            for (let attempt = 0; attempt < QUERY_RETRY_ATTEMPTS; attempt++) {
-                const base = retryAfterMs(primaryError) ?? this.queryRetryBackoffMs[attempt] ?? 3_000;
+            for (let attempt = 0; attempt < INGEST_RETRY_ATTEMPTS; attempt++) {
+                const base = retryAfterMs(primaryError) ?? INGEST_RETRY_BACKOFF_MS[attempt] ?? 3_000;
                 const wait = base + Math.floor(Math.random() * QUERY_RETRY_JITTER_MS);
                 console.warn(
                     `[EmbeddingPipeline] Batch embedding failed via ${active?.name ?? 'unknown'} `
-                    + `(attempt ${attempt + 1}/${QUERY_RETRY_ATTEMPTS + 1}); retrying in ${wait}ms:`,
+                    + `(attempt ${attempt + 1}/${INGEST_RETRY_ATTEMPTS + 1}); retrying in ${wait}ms:`,
                     primaryError instanceof Error ? primaryError.message : primaryError,
                     isRateLimited(primaryError) ? '(rate-limited)' : ''
                 );
@@ -880,11 +947,14 @@ export class EmbeddingPipeline {
         // failures that were never worth a promotion. `Retry-After` is honoured
         // when the provider sends one; jitter keeps concurrent turns from
         // retrying in lockstep against the same rate limit.
+        const _measure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
+        const _qt0 = Date.now();
         let primaryError: unknown;
         for (let attempt = 0; attempt <= QUERY_RETRY_ATTEMPTS; attempt++) {
             try {
                 const embedding = await runQuery(provider, attempt === 0 ? 'live-query' : `live-query-retry-${attempt}`);
                 this.noteQuerySuccess();
+                if (_measure) console.log(`[EmbeddingPipeline] getEmbeddingForQuery SUCCESS in ${Date.now() - _qt0}ms via ${provider.name} (attempt ${attempt + 1}/${QUERY_RETRY_ATTEMPTS + 1})`);
                 return embedding;
             } catch (err) {
                 primaryError = err;
@@ -920,6 +990,7 @@ export class EmbeddingPipeline {
             // would return confident nonsense instead of an honest miss.
             console.warn(
                 `[EmbeddingPipeline] Query embedding degraded to lexical-only for this turn `
+                + `after ${Date.now() - _qt0}ms `
                 + `(${hardFailures}/${PROMOTE_AFTER_CONSECUTIVE_FAILURES} consecutive failures; `
                 + `active space unchanged):`,
                 primaryError instanceof Error ? primaryError.message : primaryError

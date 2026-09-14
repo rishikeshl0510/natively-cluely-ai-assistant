@@ -30,10 +30,14 @@ export interface AppSettings {
     // while idle. Off by default — the hotkey's existing behavior is unchanged
     // until the user opts in from Settings > General.
     ambientChatEnabled?: boolean;
-    // Automatic answers after the interviewer finishes a question. Off by
-    // default: until the user opts in from Settings > General, an answer is
-    // produced only by the What-to-Answer hotkey, exactly as before. The
-    // trigger itself lives in AppState.scheduleAutoAnswer().
+    // Automatic answers after the interviewer finishes a question. ON by
+    // default (2026-09, teleprompter rework) — the overlay's manual answer
+    // buttons were removed entirely, so this is now the only live-answer
+    // trigger for a user who has never touched Settings. An explicit
+    // persisted `false` (a user who deliberately disabled it) is still
+    // honored; only an unset value gets the new default (see AppState's
+    // constructor in main.ts). The trigger itself lives in
+    // AppState.scheduleAutoAnswer().
     autoAnswerEnabled?: boolean;
     // Direct Assist is the opt-in, single-provider answer path. It deliberately
     // bypasses meeting retrieval and the legacy answer-orchestration pipeline.
@@ -94,6 +98,9 @@ export interface AppSettings {
     knowledgeMode?: boolean;
     phoneMirrorEnabled?: boolean;
     phoneMirrorExposeOnLan?: boolean;
+    // When true, PhoneMirrorService drops publishUserMessage() entirely — the
+    // phone shows only AI answers, never the questions that produced them.
+    phoneMirrorAnswersOnly?: boolean;
     // External optional provider. Default false: do not spawn Ollama unless
     // the user selects an Ollama model or explicitly opts into auto-start.
     autoStartOllama?: boolean;

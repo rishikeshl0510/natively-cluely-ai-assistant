@@ -40,6 +40,13 @@ pub mod app_chord;
 #[cfg(target_os = "windows")]
 pub mod keyboard_hook_windows;
 
+// Windows-only: detect whether this session is an RDP session or is being
+// shadowed/remote-controlled, so the app can hide itself where content
+// protection (WDA_EXCLUDEFROMCAPTURE) does not reach — see the module doc
+// comment in remote_session_windows.rs for why that gap exists.
+#[cfg(target_os = "windows")]
+pub mod remote_session_windows;
+
 use crate::audio_config::{CHUNK_BATCH_COUNT, CHUNK_BATCH_TIMEOUT_MS, DSP_POLL_MS};
 use crate::resampler::Resampler;
 use crate::silence_suppression::{FrameAction, SilenceSuppressionConfig, SilenceSuppressor, SpeechEdge};

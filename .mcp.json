@@ -6,6 +6,13 @@
         "serve"
       ],
       "type": "stdio"
+    },
+    "natively-interview-knowledge": {
+      "command": "node",
+      "args": [
+        "mcp-server/index.mjs"
+      ],
+      "type": "stdio"
     }
   }
 }

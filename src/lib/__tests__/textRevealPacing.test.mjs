@@ -28,18 +28,18 @@ function run(state, fullText, frames, opts) {
   return state;
 }
 
-test('config matches the current tuning (400 chars/sec ≈ 100 tok/s, 80ms/12-char initial buffer, deferred flush by default)', () => {
+test('config matches the current tuning (400 chars/sec, reverted from a brief 3000 c/s experiment — see textRevealPacing.mjs for why; 80ms/12-char initial buffer, immediate flush on complete)', () => {
   assert.equal(MAX_REVEAL_CHARACTERS_PER_SECOND, 400);
   assert.equal(MAX_REVEAL_CHARS_PER_MS, 0.4);
   assert.equal(INITIAL_BUFFER_MS, 80);
   assert.equal(INITIAL_BUFFER_CHAR_THRESHOLD, 12);
-  assert.equal(FLUSH_IMMEDIATELY_ON_COMPLETE, false);
+  assert.equal(FLUSH_IMMEDIATELY_ON_COMPLETE, true);
   assert.deepEqual(STREAM_RENDER_CONFIG, {
     maxCharactersPerSecond: 400,
     initialBufferMs: 80,
     initialBufferCharacterThreshold: 12,
     useAnimationFrame: true,
-    flushImmediatelyOnComplete: false,
+    flushImmediatelyOnComplete: true,
   });
 });
 
@@ -90,7 +90,7 @@ test('a slow provider (below the cap) is shown essentially immediately — the c
   let now = 0;
   for (const word of words) {
     arrived += (arrived ? ' ' : '') + word;
-    // Real gap between provider chunks: 300ms — much slower than 400 char/s
+    // Real gap between provider chunks: 300ms — much slower than the cap
     // could ever fall behind on a few-character word.
     for (let i = 0; i < Math.round(300 / FRAME_MS); i += 1) {
       now += FRAME_MS;
@@ -123,7 +123,8 @@ test('a fast burst (provider faster than the cap) is buffered and drained smooth
   // No single frame should ever reveal more than a couple of frames' worth
   // of the rate cap (small slack for the initial-buffer catch-up frame).
   assert.ok(maxDelta <= Math.ceil(MAX_REVEAL_CHARS_PER_MS * FRAME_MS) + 2, `no frame should dump far more than the per-frame cap (saw ${maxDelta})`);
-  assert.ok(frames > 50, 'a 2000-char burst at 400 chars/sec should take multiple seconds worth of frames, not a handful');
+  const expectedMinFrames = Math.floor((text.length / (MAX_REVEAL_CHARS_PER_MS * FRAME_MS)) * 0.8);
+  assert.ok(frames > expectedMinFrames, `a 2000-char burst at ${MAX_REVEAL_CHARACTERS_PER_SECOND} chars/sec should take multiple frames to drain, not a handful (saw ${frames}, expected > ${expectedMinFrames})`);
 });
 
 test('reducedMotion reveals everything on the very first tick, bypassing buffer/cap/pauses', () => {
@@ -303,8 +304,8 @@ test('tickPacer forward-progress invariant: any frame with spendable budget reve
 });
 
 test('estimateRevealDurationMs matches the configured rate', () => {
-  assert.equal(estimateRevealDurationMs(400), 1000); // 400 chars at 400 chars/sec = 1s
-  assert.equal(estimateRevealDurationMs(4000), 10000);
+  assert.equal(estimateRevealDurationMs(MAX_REVEAL_CHARACTERS_PER_SECOND), 1000); // one cap's worth of chars = 1s
+  assert.equal(estimateRevealDurationMs(MAX_REVEAL_CHARACTERS_PER_SECOND * 10), 10000);
 });
 
 test('a full stream (buffer -> steady reveal -> punctuation holds) eventually reaches the full text with no stalls', () => {

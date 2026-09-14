@@ -263,6 +263,32 @@ export class WindowHelper {
     this.appState = appState;
   }
 
+  // Union of every connected display's bounds — the full multi-monitor
+  // desktop, not any single screen's work area. Used ONLY for the live
+  // mid-drag clamp (see moveOverlayGroupTo): clamping every frame to
+  // screen.getDisplayMatching(candidatePosition)'s single work area is a
+  // trap at a monitor boundary — the candidate position still has majority
+  // overlap with the FIRST monitor right up until the moment it would cross,
+  // so it keeps getting clamped back into that monitor and can never
+  // accumulate enough offset to flip majority-overlap to the second one. The
+  // window hits an invisible wall at the screen edge. Clamping against the
+  // union of all displays during the drag removes that wall; the existing
+  // single-display settle clamp (clampOverlayGroupIntoWorkArea, called on
+  // drag release) still neatly snaps the group onto whichever display it
+  // actually ends up mostly on.
+  private getVirtualDesktopBounds(): Electron.Rectangle {
+    const displays = screen.getAllDisplays();
+    if (displays.length === 0) return screen.getPrimaryDisplay().bounds;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const d of displays) {
+      minX = Math.min(minX, d.bounds.x);
+      minY = Math.min(minY, d.bounds.y);
+      maxX = Math.max(maxX, d.bounds.x + d.bounds.width);
+      maxY = Math.max(maxY, d.bounds.y + d.bounds.height);
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
   private getDisplayWorkArea(bounds?: Electron.Rectangle): Electron.Rectangle {
     if (bounds) {
       return screen.getDisplayMatching(bounds).workArea;
@@ -2004,6 +2030,30 @@ export class WindowHelper {
     };
   }
 
+  /**
+   * Same shape as clampedGroupOrigin, but bounded by the UNION of every
+   * display instead of whichever single display currently has majority
+   * overlap. Used only while a drag is actively in progress
+   * (moveOverlayGroupTo) — see getVirtualDesktopBounds's comment for why the
+   * single-display version traps the group at a monitor boundary. Still
+   * prevents the group from being dragged fully off every screen at once.
+   */
+  private clampedGroupOriginToVirtualDesktop(x: number, y: number): { x: number; y: number } {
+    const overlay = this.overlayWindow;
+    if (!overlay || overlay.isDestroyed()) return { x, y };
+    const o = overlay.getBounds();
+    const bounds = this.getVirtualDesktopBounds();
+    const pillH = this.pillSize.height;
+    const minY = bounds.y + WindowHelper.PILL_GAP + pillH;
+    const maxY = bounds.y + bounds.height - o.height;
+    const minX = bounds.x;
+    const maxX = bounds.x + bounds.width - o.width;
+    return {
+      x: Math.round(Math.min(Math.max(x, minX), Math.max(minX, maxX))),
+      y: Math.round(Math.min(Math.max(y, minY), Math.max(minY, maxY))),
+    };
+  }
+
   private clampOverlayGroupIntoWorkArea(): void {
     const overlay = this.overlayWindow;
     if (!overlay || overlay.isDestroyed()) return;
@@ -2050,6 +2100,17 @@ export class WindowHelper {
   // Clamping continuously costs no reachable end state: endOverlayGroupDrag
   // already snapped the group fully into the work area on release, so this
   // only removes an illegal transient.
+  //
+  // UPDATE: the continuous clamp during the drag itself
+  // (clampedGroupOriginToVirtualDesktop) bounds against the UNION of every
+  // display, not the single display matching the candidate position —
+  // clamping to a single display every frame silently walled the group at
+  // any monitor boundary (majority-overlap with the first monitor never
+  // flips to the second, because the candidate position keeps getting
+  // pulled back before it can cross). The single-display clamp
+  // (clampedGroupOrigin) is still exactly right for the SETTLE step on
+  // release, where "snap onto whichever one display you ended up on" is the
+  // desired behavior — it's just wrong as a per-frame constraint mid-drag.
   public beginOverlayGroupDrag(): void {
     if (!this.overlayGroupDragManaged) return;
     const overlay = this.overlayWindow;
@@ -2068,7 +2129,7 @@ export class WindowHelper {
     if (!this.groupDragOrigin) this.beginOverlayGroupDrag();
     const origin = this.groupDragOrigin;
     if (!origin) return;
-    const target = this.clampedGroupOrigin(origin.x + offsetX, origin.y + offsetY);
+    const target = this.clampedGroupOriginToVirtualDesktop(origin.x + offsetX, origin.y + offsetY);
     const o = overlay.getBounds();
     if (target.x === o.x && target.y === o.y) return;
     this.overlayGroupDragging = true;

@@ -26,6 +26,7 @@ export interface ShortcutConfig {
     moveWindowRight: string[];
     // General
     toggleVisibility: string[];
+    toggleExpand: string[];
     toggleMousePassthrough: string[];
     processScreenshots: string[];
     captureAndProcess: string[];
@@ -59,6 +60,7 @@ function buildDefaultShortcuts(): ShortcutConfig {
         moveWindowLeft: [mod, shift, '←'],
         moveWindowRight: [mod, shift, '→'],
         toggleVisibility: [mod, 'B'],
+        toggleExpand: [mod, 'E'],
         toggleMousePassthrough: [mod, shift, 'B'],
         processScreenshots: [mod, 'Enter'],
         captureAndProcess: [mod, shift, 'Enter'],
@@ -110,6 +112,7 @@ const BACKEND_ID_TO_ACTION: Partial<Record<string, keyof ShortcutConfig>> = {
     'window:move-right': 'moveWindowRight',
     // General
     'general:toggle-visibility': 'toggleVisibility',
+    'general:toggle-expand': 'toggleExpand',
     'general:toggle-mouse-passthrough': 'toggleMousePassthrough',
     'general:process-screenshots': 'processScreenshots',
     'general:capture-and-process': 'captureAndProcess',
@@ -285,6 +288,7 @@ export const useShortcuts = () => {
             case 'moveWindowRight': backendId = 'window:move-right'; break;
             // General
             case 'toggleVisibility': backendId = 'general:toggle-visibility'; break;
+            case 'toggleExpand': backendId = 'general:toggle-expand'; break;
             case 'toggleMousePassthrough': backendId = 'general:toggle-mouse-passthrough'; break;
             case 'processScreenshots': backendId = 'general:process-screenshots'; break;
             case 'captureAndProcess': backendId = 'general:capture-and-process'; break;

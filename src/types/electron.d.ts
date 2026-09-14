@@ -416,6 +416,19 @@ export interface ElectronAPI {
   modesDeleteReferenceFile: (id: string) => Promise<{ success: boolean; error?: string }>
   modesGetReferenceFileStatus: (modeId: string) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: string; chunkCount: number }>; error?: string }>
   onModeFileIndexStatus: (callback: (data: { modeId: string; fileId: string; phase: 'indexing' | 'done' }) => void) => () => void
+  // Free-tier "Interview Knowledge" (docs/specs/oss-knowledge-rag-spec.md) — separate from the modesXxx bindings above; never gated.
+  knowledgeDocAddText: (params: { title: string; content: string; collectionId?: string | null; docType?: string }) => Promise<{ success: boolean; doc?: { id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }; error?: string }>
+  knowledgeDocAddFile: (params?: { collectionId?: string | null; docType?: string }) => Promise<{ success: boolean; doc?: { id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }; cancelled?: boolean; error?: string }>
+  knowledgeDocAddFolder: (params?: { collectionId?: string | null }) => Promise<{ success: boolean; added?: number; skipped?: number; errors?: Array<{ path: string; reason: string }>; cancelled?: boolean; error?: string }>
+  knowledgeDocList: (collectionId?: string | null) => Promise<{ success: boolean; docs: Array<{ id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }>; error?: string }>
+  knowledgeDocDelete: (id: string) => Promise<{ success: boolean; error?: string }>
+  knowledgeDocGetStatus: (id: string) => Promise<{ success: boolean; status: string; chunkCount: number; error?: string }>
+  knowledgeCollectionCreate: (params: { name: string; interviewerName?: string; contextNotes?: string }) => Promise<{ success: boolean; collection?: { id: string; name: string; interviewerName: string | null; contextNotes: string | null; createdAt: string }; error?: string }>
+  knowledgeCollectionList: () => Promise<{ success: boolean; collections: Array<{ id: string; name: string; interviewerName: string | null; contextNotes: string | null; createdAt: string }>; error?: string }>
+  knowledgeCollectionUpdate: (id: string, updates: { name?: string; interviewerName?: string | null; contextNotes?: string | null }) => Promise<{ success: boolean; error?: string }>
+  knowledgeCollectionDelete: (id: string) => Promise<{ success: boolean; error?: string }>
+  knowledgeCollectionGetActive: () => Promise<{ success: boolean; activeCollectionId: string | null; error?: string }>
+  knowledgeCollectionSetActive: (id: string | null) => Promise<{ success: boolean; error?: string }>
   onKnowledgeIndexProgress: (callback: (data: { fileId: string; status: string; startedAt?: number; finishedAt?: number; error?: string }) => void) => () => void
   knowledgeListPacks: (modeId: string) => Promise<{ success: boolean; packs: Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>; error?: string }>
   knowledgeGetPack: (fileId: string) => Promise<{ success: boolean; pack: any | null; error?: string }>
@@ -650,8 +663,12 @@ export interface ElectronAPI {
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
-  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number }) => void) => () => void
+  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number; citations?: Array<{ sourceId: string; fileName: string; text: string }> }) => void) => () => void
   onIntelligenceSuggestedAnswerDiscard: (callback: (data: { reason: string }) => void) => () => void
+  /** Fired when Auto-Answer's judge approves a candidate and dispatch starts,
+   *  before the first token arrives — lets the UI show it's working during
+   *  the judge+retrieval+TTFT gap instead of looking idle. */
+  onIntelligenceAutoAnswerStarted: (callback: () => void) => () => void
   // Verified code execution (background): ✓ badge + corrected message.
   onIntelligenceCodeVerified: (callback: (data: { question: string; passed: number; total: number; language: string }) => void) => () => void
   onIntelligenceCodeCorrection: (callback: (data: { question: string; answer: string; note: string; reVerified: boolean }) => void) => () => void
@@ -677,7 +694,7 @@ export interface ElectronAPI {
   // Streaming listeners
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
-  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; citations?: Array<{ sourceId: string; fileName: string; text: string }> }) => void) => () => void
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
 
   // NOTE: onSkillsChanged broadcast subscription was removed. Skills are
@@ -971,6 +988,7 @@ export interface ElectronAPI {
   // manager. Enable/disable is intentionally NOT exposed on the renderer —
   // users who don't want a skill delete it instead.
   skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+  skillsSetEnabled: (id: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   // Skill upload — step-3 wiring. `skillsUpload(payload, { autoInstall: true })`
   // is a one-shot validate+install; `skillsPreview(payload)` always sets
   // `autoInstall: false` so the renderer can show a confirm card first.
@@ -985,6 +1003,7 @@ export interface ElectronAPI {
   phoneMirrorEnable: (exposeOnLan: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
   phoneMirrorDisable: () => Promise<{ success: true }>;
   phoneMirrorSetLan: (exposeOnLan: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
+  phoneMirrorSetAnswersOnly: (answersOnly: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
   phoneMirrorRotateToken: () => Promise<PhoneMirrorInfo | { error: string }>;
   // Arm the 60s one-click pairing window for the companion browser extension.
   phoneMirrorArmExtension: () => Promise<{ armedMs: number } | { error: string }>;
@@ -1233,6 +1252,8 @@ export interface PhoneMirrorInfo {
   running: boolean;
   enabled: boolean;
   exposeOnLan: boolean;
+  /** When true, only AI answers reach the phone — the user's own questions are never mirrored. */
+  answersOnly: boolean;
   port: number;
   loopbackUrl: string | null;
   primaryUrl: string | null;

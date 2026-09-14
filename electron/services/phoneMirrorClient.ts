@@ -23,9 +23,6 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
         --accent: #6cf0d6;
         --accent-2: #55a6ff;
         --danger: #ff5d6c;
-        --input-h: 56px;
-        --actions-h: 52px;
-        --bar-h: calc(var(--input-h) + var(--actions-h) + 20px);
       }
       * { box-sizing: border-box; }
       html, body { min-height: 100%; }
@@ -68,7 +65,7 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
       /* ── Feed ────────────────────────────────── */
       .feed {
         display: flex; flex-direction: column; gap: 12px; min-height: 0;
-        overflow-y: auto; padding: 12px 0 calc(var(--bar-h) + 24px);
+        overflow-y: auto; padding: 12px 0 24px;
         scroll-behavior: smooth; overscroll-behavior: contain;
       }
       .empty {
@@ -169,12 +166,13 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
       .content .codeblock-copy:active { transform: scale(0.97); }
       .content .codeblock-copy.copied { color: var(--accent); border-color: rgba(108,240,214,0.32); }
       .content .codeblock pre {
-        margin: 0; padding: 12px 14px; overflow-x: auto;
+        margin: 0; padding: 12px 14px; overflow-x: auto; overflow-y: auto;
+        max-height: 46vh; overscroll-behavior: contain;
         font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
         color: #e6edf3; white-space: pre;
         scrollbar-width: thin;
       }
-      .content .codeblock pre::-webkit-scrollbar { height: 6px; }
+      .content .codeblock pre::-webkit-scrollbar { height: 6px; width: 6px; }
       .content .codeblock pre::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
       .content .codeblock.streaming { border-color: rgba(108,240,214,0.18); }
       .content .codeblock.streaming .codeblock-head { color: var(--accent); }
@@ -198,74 +196,6 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
         background: var(--accent); border-radius: 2px;
         animation: blink 1s steps(2, end) infinite;
       }
-      /* ── Bottom panel ─────────────────────── */
-      .bottom-panel {
-        position: fixed; left: 14px; right: 14px;
-        bottom: calc(8px + env(safe-area-inset-bottom));
-        display: flex; flex-direction: column; gap: 8px;
-        padding: 8px;
-        border: 1px solid var(--line-soft); border-radius: 14px;
-        background: rgba(8,12,17,0.88);
-        backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-        box-shadow: 0 16px 42px rgba(0,0,0,0.45);
-      }
-      /* Quick actions row */
-      .quick-actions {
-        display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px;
-        scrollbar-width: none;
-      }
-      .quick-actions::-webkit-scrollbar { display: none; }
-      .qa-btn {
-        flex: 0 0 auto;
-        height: 30px; padding: 0 10px;
-        border-radius: 6px; border: 1px solid var(--line-soft);
-        background: rgba(255,255,255,0.04); color: var(--muted);
-        font-size: 11.5px; font-weight: 600; letter-spacing: 0.2px;
-        white-space: nowrap;
-        transition: background 140ms, color 140ms, border-color 140ms;
-      }
-      .qa-btn:active { transform: scale(0.96); }
-      .qa-btn.working {
-        color: var(--accent); border-color: rgba(108,240,214,0.32);
-        background: rgba(108,240,214,0.06);
-      }
-      .qa-btn.screenshot-btn {
-        color: var(--accent-2); border-color: rgba(85,166,255,0.28);
-        background: rgba(85,166,255,0.05);
-      }
-      /* Chat input row */
-      .input-row {
-        display: flex; gap: 8px; align-items: center;
-      }
-      .chat-input {
-        flex: 1; min-width: 0; height: 40px; padding: 0 12px;
-        background: rgba(255,255,255,0.05); border: 1px solid var(--line-soft);
-        border-radius: 8px; color: var(--text); font: inherit; font-size: 14px;
-        outline: none;
-        transition: border-color 160ms;
-      }
-      .chat-input::placeholder { color: var(--muted); }
-      .chat-input:focus { border-color: rgba(108,240,214,0.4); }
-      .send-btn {
-        flex: 0 0 40px; height: 40px; border-radius: 8px;
-        background: linear-gradient(180deg, var(--accent), #4dd9bd); color: #00261d;
-        font-size: 18px; font-weight: 700;
-        display: flex; align-items: center; justify-content: center;
-        transition: transform 120ms;
-      }
-      .send-btn:active { transform: scale(0.94); }
-      .send-btn:disabled { opacity: 0.42; pointer-events: none; }
-      /* Row of utility buttons */
-      .util-row {
-        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px;
-      }
-      .util-btn {
-        height: 38px; border-radius: 8px;
-        background: var(--panel-2); color: var(--text);
-        font-size: 12px; font-weight: 600; letter-spacing: 0.2px;
-        transition: transform 140ms cubic-bezier(0.16,1,0.3,1), background 140ms;
-      }
-      .util-btn:active { transform: scale(0.97) translateY(1px); }
       /* ── Toast ─────────────────────────────── */
       .toast {
         position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 70px);
@@ -301,35 +231,9 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
 
       <section class="feed" id="feed" aria-live="polite">
         <div class="empty" id="empty">
-          Waiting for responses from your desktop.<br/>
-          <span style="font-size:12px;opacity:0.6;margin-top:6px;display:block;">Use the actions below or type a message.</span>
+          Waiting for the next answer…
         </div>
       </section>
-
-      <div class="bottom-panel">
-        <!-- Quick action shortcuts -->
-        <div class="quick-actions" id="quickActions">
-          <button class="qa-btn" data-action="whatToAnswer" type="button">What to Say</button>
-          <button class="qa-btn" data-action="codeHint" type="button">Code Hint</button>
-          <button class="qa-btn" data-action="clarify" type="button">Clarify</button>
-          <button class="qa-btn" data-action="brainstorm" type="button">Brainstorm</button>
-          <button class="qa-btn" data-action="answer" type="button">Answer</button>
-          <button class="qa-btn" data-action="followUp" type="button">Follow Up</button>
-          <button class="qa-btn" data-action="dynamicAction4" type="button">Recap</button>
-          <button class="qa-btn screenshot-btn" id="screenshotBtn" type="button" title="Capture desktop screenshot for AI prompt">📷 Capture</button>
-        </div>
-        <!-- Chat input -->
-        <div class="input-row">
-          <input class="chat-input" id="chatInput" type="text" placeholder="Ask anything…" autocomplete="off" autocorrect="off" spellcheck="false" />
-          <button class="send-btn" id="sendBtn" type="button" aria-label="Send">↑</button>
-        </div>
-        <!-- Utility buttons -->
-        <div class="util-row">
-          <button class="util-btn" id="clearButton" type="button">Clear</button>
-          <button class="util-btn" id="copyButton" type="button">Copy</button>
-          <button class="util-btn" id="scrollButton" type="button">Bottom</button>
-        </div>
-      </div>
 
       <div class="toast" id="toast" role="status"></div>
     </main>
@@ -342,8 +246,6 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
         const statusText = document.getElementById('statusText');
         const subtitle = document.getElementById('subtitle');
         const toast = document.getElementById('toast');
-        const chatInput = document.getElementById('chatInput');
-        const sendBtn = document.getElementById('sendBtn');
 
         // ───── Markdown renderer ─────────────────────────────────────────
         const HTML_ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -630,9 +532,14 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
         const params = new URLSearchParams(window.location.search);
         const token = params.get('t') || '';
 
-        const messages = [];        // { id, role, content, createdAt, label? }
-        let messageIdCounter = 0;   // monotonic counter — Date.now() alone collides when two acks fire in the same ms (see issue #253)
-        let live = null;            // { streamId, content, createdAt }
+        // Plain answer-streaming view (2026-09 rework): no scrollback feed, no
+        // user/question cards, no chat input or quick-action buttons — a
+        // single current answer, replaced wholesale as new ones land,
+        // mirroring the main overlay's teleprompter design exactly. "live"
+        // holds the in-flight streaming answer; once done it becomes current
+        // rather than being appended to a history array.
+        let current = null;  // { content, createdAt }
+        let live = null;     // { streamId, content, createdAt }
         let socket = null;
         let reconnectTimer = null;
         let reconnectDelay = 800;
@@ -648,90 +555,45 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
           status.classList.toggle('connected', isConnected);
           statusText.textContent = isConnected ? 'Connected' : 'Offline';
           subtitle.textContent = isConnected ? 'Live mirror active' : 'Reconnecting…';
-          sendBtn.disabled = !isConnected;
-          document.querySelectorAll('.qa-btn').forEach(function (b) { b.disabled = !isConnected; });
         }
 
-        function fmtTime(value) {
-          const d = value ? new Date(value) : new Date();
-          if (Number.isNaN(d.getTime())) return '';
-          return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        }
-
-        function near(scrollEl, px) {
-          return scrollEl.scrollHeight - scrollEl.clientHeight - scrollEl.scrollTop < px;
-        }
-
-        function scrollToLatest(force) {
-          if (force || near(feed, 80)) {
-            feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
-          }
+        function scrollToLatest() {
+          feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+          // A streaming code block grows its OWN scroll container (capped by
+          // max-height so the page itself doesn't balloon) — follow its
+          // bottom too, so the newest generated lines stay in view.
+          feed.querySelectorAll('.codeblock.streaming pre').forEach((pre) => {
+            pre.scrollTop = pre.scrollHeight;
+          });
         }
 
         function buildCard(m, opts) {
-          // Screenshot-queued notification card (no image — stays on desktop)
-          if (m.type === 'screenshot-queued') {
-            const card = document.createElement('article');
-            card.className = 'card screenshot-card';
-            card.dataset.id = m.id || '';
-            const meta = document.createElement('div');
-            meta.className = 'meta';
-            const role = document.createElement('span');
-            role.className = 'role';
-            const pip = document.createElement('span'); pip.className = 'pip';
-            const lbl = document.createElement('span'); lbl.textContent = '📷 Screenshot queued for AI';
-            role.append(pip, lbl);
-            const right = document.createElement('span'); right.textContent = fmtTime(m.createdAt);
-            meta.append(role, right);
-            card.append(meta);
-            return card;
-          }
-
-          // Normal message card
           const card = document.createElement('article');
-          card.className = 'card' + (m.role === 'user' ? ' user' : '') + (opts && opts.live ? ' live' : '');
-          card.dataset.id = m.id || '';
+          card.className = 'card' + (opts && opts.live ? ' live' : '');
           const meta = document.createElement('div');
           meta.className = 'meta';
-          const role = document.createElement('span');
-          role.className = 'role' + (m.role === 'user' ? ' user' : '');
-          const pip = document.createElement('span'); pip.className = 'pip';
-          const roleLabel = document.createElement('span');
-          roleLabel.textContent = m.role === 'user' ? 'You' : 'Assistant';
-          role.append(pip, roleLabel);
-          // Label tag for shortcut-triggered responses
-          const labelTag = document.createElement('span');
-          labelTag.className = 'label-tag';
-          labelTag.style.display = m.label ? 'inline-block' : 'none';
-          if (m.label) labelTag.textContent = m.label;
-          const right = document.createElement('span');
-          right.textContent = fmtTime(m.createdAt);
           const badge = document.createElement('span');
           badge.className = 'badge'; badge.textContent = 'Live';
-          meta.append(role, labelTag, badge, right);
+          meta.append(badge);
           const content = document.createElement('div');
           content.className = 'content';
-          if (m.role === 'user') {
-            content.style.whiteSpace = 'pre-wrap';
-            content.textContent = m.content || '';
-          } else {
-            content.innerHTML = renderMarkdown(m.content || '');
-            if (opts && opts.live) {
-              const caret = document.createElement('span');
-              caret.className = 'caret';
-              content.appendChild(caret);
-            }
-            bindCodeCopy(content);
+          content.innerHTML = renderMarkdown(m.content || '');
+          if (opts && opts.live) {
+            const caret = document.createElement('span');
+            caret.className = 'caret';
+            content.appendChild(caret);
           }
+          bindCodeCopy(content);
           card.append(meta, content);
           return card;
         }
 
         function render() {
-          empty.style.display = (messages.length === 0 && !live) ? 'grid' : 'none';
+          const has = Boolean(current || live);
+          empty.style.display = has ? 'none' : 'grid';
           feed.querySelectorAll('.card').forEach((c) => c.remove());
-          for (const m of messages) feed.appendChild(buildCard(m));
-          if (live) feed.appendChild(buildCard({ id: 'live:' + live.streamId, role: 'assistant', content: live.content, createdAt: live.createdAt }, { live: true }));
+          if (live) feed.appendChild(buildCard(live, { live: true }));
+          else if (current) feed.appendChild(buildCard(current));
           scrollToLatest();
         }
 
@@ -772,36 +634,24 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
             else clearTimeout(liveRenderRaf);
             liveRenderRaf = 0;
           }
-          if (live && live.streamId === streamId) {
-            messages.push({ id: 'a:' + streamId, role: 'assistant', content: content || live.content, createdAt: createdAt || live.createdAt });
-            live = null;
-            render();
-          } else if (content) {
-            messages.push({ id: 'a:' + streamId, role: 'assistant', content, createdAt: createdAt || new Date().toISOString() });
-            render();
-          }
-        }
-
-        // ───── Send command to server ─────────────────────────────────────
-        function sendCommand(cmd) {
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            try { socket.send(JSON.stringify(cmd)); } catch (_) {}
-          }
+          const finalText = (live && live.streamId === streamId) ? (content || live.content) : content;
+          if (!finalText) { live = null; return; }
+          current = { content: finalText, createdAt: createdAt || (live && live.createdAt) || new Date().toISOString() };
+          live = null;
+          render();
         }
 
         // ───── Event handler ──────────────────────────────────────────────
+        // Question/user-echo, ack, and screenshot-queued events are
+        // intentionally not rendered here — this view shows only the answer
+        // itself, nothing else (see the top-of-block comment).
         function handleEvent(ev) {
           if (!ev || typeof ev !== 'object') return;
 
           if (ev.type === 'history' && Array.isArray(ev.messages)) {
-            messages.length = 0;
-            for (const m of ev.messages) messages.push(m);
+            const lastAssistant = [...ev.messages].reverse().find((m) => m && m.role === 'assistant');
+            current = lastAssistant ? { content: lastAssistant.content, createdAt: lastAssistant.createdAt } : null;
             live = null;
-            render();
-            return;
-          }
-          if (ev.type === 'user') {
-            messages.push({ id: ev.id, role: 'user', content: ev.content, createdAt: ev.createdAt });
             render();
             return;
           }
@@ -824,24 +674,13 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
           }
           // Non-streaming assistant response from shortcut-triggered actions
           if (ev.type === 'assistant') {
-            messages.push({ id: ev.id, role: 'assistant', content: ev.content, createdAt: ev.createdAt, label: ev.label });
+            current = { content: ev.content, createdAt: ev.createdAt };
+            live = null;
             render();
-            scrollToLatest(true);
             return;
           }
-          // Ack events from stealth operations (screenshot captured, etc.)
           if (ev.type === 'ack') {
             showToast(ev.message || ev.action);
-            // For screenshot acks, also add a small card to the feed.
-            if (ev.action === 'screenshot') {
-              const id = 'ack-' + Date.now() + '-' + (++messageIdCounter);
-              messages.push({ id, type: 'screenshot-queued', createdAt: new Date().toISOString() });
-              render();
-              scrollToLatest(true);
-            }
-            return;
-          }
-          if (ev.type === 'status') {
             return;
           }
         }
@@ -887,61 +726,6 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
           } catch (e) { wakeLock = null; }
         }
 
-        // ───── Interaction handlers ───────────────────────────────────────
-        // Send chat message
-        function submitChat() {
-          const msg = chatInput.value.trim();
-          if (!msg) return;
-          sendCommand({ type: 'chat', message: msg });
-          chatInput.value = '';
-        }
-        sendBtn.addEventListener('click', submitChat);
-        chatInput.addEventListener('keydown', function (e) {
-          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitChat(); }
-        });
-
-        // Quick action buttons
-        document.querySelectorAll('.qa-btn[data-action]').forEach(function (btn) {
-          btn.addEventListener('click', function () {
-            const action = btn.dataset.action;
-            sendCommand({ type: 'action', action });
-            btn.classList.add('working');
-            setTimeout(function () { btn.classList.remove('working'); }, 1200);
-          });
-        });
-
-        // Screenshot button — triggers a stealth desktop capture queued for AI.
-        // The image stays on the PC; only a confirmation toast appears on the phone.
-        document.getElementById('screenshotBtn').addEventListener('click', function () {
-          sendCommand({ type: 'screenshot' });
-          showToast('Capturing…');
-        });
-
-        // Utility buttons
-        document.getElementById('clearButton').addEventListener('click', () => {
-          messages.length = 0; live = null; render();
-        });
-        document.getElementById('copyButton').addEventListener('click', async () => {
-          const parts = messages
-            .filter(function (m) { return !m.type || m.type !== 'screenshot-queued'; })
-            .map((m) => (m.role === 'user' ? 'You: ' : (m.label ? '[' + m.label + '] ' : '')) + m.content);
-          if (live && live.content) parts.push(live.content);
-          const text = parts.join('\\n\\n');
-          if (!text) return;
-          try {
-            if (navigator.clipboard && window.isSecureContext) {
-              await navigator.clipboard.writeText(text);
-            } else {
-              const ta = document.createElement('textarea');
-              ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-              document.body.appendChild(ta); ta.select();
-              document.execCommand('copy'); document.body.removeChild(ta);
-            }
-            showToast('Copied');
-          } catch (e) { showToast('Copy blocked'); }
-        });
-        document.getElementById('scrollButton').addEventListener('click', () => scrollToLatest(true));
-
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') requestWakeLock();
         });
@@ -951,10 +735,6 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
           status.classList.remove('connected');
           return;
         }
-
-        // Start disconnected — buttons disabled until connected
-        sendBtn.disabled = true;
-        document.querySelectorAll('.qa-btn').forEach(function (b) { b.disabled = true; });
 
         requestWakeLock();
         connect();

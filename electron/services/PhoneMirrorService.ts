@@ -15,6 +15,8 @@ export interface PhoneMirrorInfo {
   running: boolean;
   enabled: boolean;
   exposeOnLan: boolean;
+  /** When true, only AI answers reach the phone — the user's own questions are never mirrored. */
+  answersOnly: boolean;
   port: number;
   loopbackUrl: string | null;
   primaryUrl: string | null;
@@ -285,6 +287,19 @@ export class PhoneMirrorService {
   }
 
   /**
+   * Toggle "only mirror answers". Unlike setExposeOnLan this never needs a
+   * restart or a security confirmation — it only changes what
+   * publishUserMessage() does going forward, so the server (if running) keeps
+   * serving the same session. Persisted immediately.
+   */
+  async setAnswersOnly(value: boolean): Promise<PhoneMirrorInfo> {
+    SettingsManager.getInstance().set('phoneMirrorAnswersOnly', !!value);
+    const info = await this.snapshot();
+    this.emitStatus(info);
+    return info;
+  }
+
+  /**
    * IPC-layer helper: flip the per-session "user has confirmed LAN bind" sentinel
    * AFTER the dialog has returned an explicit Allow. Without this the next
    * setExposeOnLan(true) would re-prompt unnecessarily.
@@ -322,6 +337,11 @@ export class PhoneMirrorService {
 
   publishUserMessage(id: string, content: string): void {
     if (!this.isRunning() || !content?.trim()) return;
+    // "Only mirror answers" — the phone must never show what the user typed
+    // (on the desktop OR on the phone's own chat box), only the resulting AI
+    // answer. Dropping it here, upstream of history + broadcast, keeps every
+    // caller (desktop chat, phone chat, clarifications) covered by one gate.
+    if (SettingsManager.getInstance().get('phoneMirrorAnswersOnly')) return;
     const msg: PersistedMessage = {
       id: 'u:' + id,
       role: 'user',
@@ -834,11 +854,13 @@ export class PhoneMirrorService {
 
   async snapshot(): Promise<PhoneMirrorInfo> {
     const enabled = !!SettingsManager.getInstance().get('phoneMirrorEnabled');
+    const answersOnly = !!SettingsManager.getInstance().get('phoneMirrorAnswersOnly');
     if (!this.isRunning()) {
       const info: PhoneMirrorInfo = {
         running: false,
         enabled,
         exposeOnLan: this.exposeOnLan,
+        answersOnly,
         port: 0,
         loopbackUrl: null,
         primaryUrl: null,
@@ -877,6 +899,7 @@ export class PhoneMirrorService {
       running: true,
       enabled,
       exposeOnLan: this.exposeOnLan,
+      answersOnly,
       port: this.port,
       loopbackUrl,
       primaryUrl,

@@ -64,6 +64,7 @@ const EMPTY_INFO: PhoneMirrorInfo = {
   running: false,
   enabled: false,
   exposeOnLan: false,
+  answersOnly: false,
   port: 0,
   loopbackUrl: null,
   primaryUrl: null,
@@ -122,7 +123,7 @@ const PhoneMirrorSwitch: React.FC<{
 export const PhoneMirrorSettings: React.FC = () => {
   const t = useT();
   const [info, setInfo] = useState<PhoneMirrorInfo>(EMPTY_INFO);
-  const [busy, setBusy] = useState<null | 'enable' | 'disable' | 'lan' | 'rotate'>(null);
+  const [busy, setBusy] = useState<null | 'enable' | 'disable' | 'lan' | 'rotate' | 'answersOnly'>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Companion browser-extension pairing: countdown (seconds left) while the 60s
@@ -219,7 +220,7 @@ export const PhoneMirrorSettings: React.FC = () => {
   );
 
   const apply = useCallback(
-    async (key: 'enable' | 'disable' | 'lan' | 'rotate', fn: () => Promise<any>) => {
+    async (key: 'enable' | 'disable' | 'lan' | 'rotate' | 'answersOnly', fn: () => Promise<any>) => {
       setBusy(key);
       setError(null);
       try {
@@ -251,6 +252,10 @@ export const PhoneMirrorSettings: React.FC = () => {
   const onToggleLan = useCallback(async () => {
     await apply('lan', () => window.electronAPI.phoneMirrorSetLan(!info.exposeOnLan));
   }, [apply, info.exposeOnLan]);
+
+  const onToggleAnswersOnly = useCallback(async () => {
+    await apply('answersOnly', () => window.electronAPI.phoneMirrorSetAnswersOnly(!info.answersOnly));
+  }, [apply, info.answersOnly]);
 
   const onRotate = useCallback(async () => {
     await apply('rotate', () => window.electronAPI.phoneMirrorRotateToken());
@@ -515,6 +520,25 @@ export const PhoneMirrorSettings: React.FC = () => {
               </span>
             </div>
           )}
+        </div>
+
+        <div className="h-px bg-border-subtle" />
+
+        {/* Row 2b — Only mirror answers */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-text-primary font-medium text-sm">Only mirror answers</div>
+            <div className="text-text-secondary text-xs mt-1">
+              Hide what you typed — the phone shows AI answers only, never the question.
+            </div>
+          </div>
+          <PhoneMirrorSwitch
+            checked={info.answersOnly}
+            onChange={onToggleAnswersOnly}
+            label="Only mirror answers"
+            busy={busy !== null}
+            onClassName="bg-accent-primary"
+          />
         </div>
 
         <div className="h-px bg-border-subtle" />

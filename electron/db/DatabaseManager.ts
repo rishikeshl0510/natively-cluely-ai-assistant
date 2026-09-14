@@ -1792,6 +1792,106 @@ export class DatabaseManager {
             }
         }
 
+        if (version < 32) {
+            console.log('[DatabaseManager] Applying migration v31 → v32: interview_knowledge_docs');
+            try {
+                // Free-tier "Interview Knowledge" feature (docs/specs/oss-knowledge-rag-spec.md).
+                // Deliberately its OWN table, separate from mode_reference_files —
+                // this feature never touches the Modes system or its Pro/trial
+                // gate. Chunk text + vectors are stored by the SHARED
+                // ModeHybridRetriever machinery in mode_reference_chunks /
+                // mode_reference_index_state (keyed by this table's `id`, which
+                // uses an `ik_` prefix so it can never collide with a Modes
+                // reference-file id) — reusing that already-hardened chunking,
+                // batching, and embedding-space-versioning logic rather than
+                // re-deriving it here.
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS interview_knowledge_docs (
+                        id              TEXT PRIMARY KEY,
+                        title           TEXT NOT NULL,
+                        content         TEXT NOT NULL,
+                        content_sha256  TEXT NOT NULL,
+                        source          TEXT NOT NULL DEFAULT 'paste',
+                        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_interview_knowledge_docs_created
+                        ON interview_knowledge_docs(created_at);
+                `);
+                this.db.pragma('user_version = 32');
+            } catch (e) {
+                console.error('[DatabaseManager] v32 interview_knowledge_docs failed (leaving version at 31 to retry next launch):', e);
+                return;
+            }
+        }
+
+        if (version < 33) {
+            console.log('[DatabaseManager] Applying migration v32 → v33: interview_knowledge_collections (per-company grouping)');
+            try {
+                // Groups Interview Knowledge docs by company/interview
+                // ("Acme Corp — onsite loop") so a resume + that company's JD +
+                // interviewer notes retrieve together, scoped to the ACTIVE
+                // company rather than searching across every company's
+                // documents at once. Cascades to interview_knowledge_docs on
+                // delete — same convention mode_reference_files uses for its
+                // owning mode (a deleted collection's docs are no longer
+                // meaningful on their own).
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS interview_knowledge_collections (
+                        id                TEXT PRIMARY KEY,
+                        name              TEXT NOT NULL,
+                        interviewer_name  TEXT,
+                        context_notes     TEXT,
+                        created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                `);
+                // Nullable FK: existing docs (added before this migration) stay
+                // valid and simply show up as "Unfiled" rather than being lost
+                // or forced into a synthetic collection.
+                try {
+                    this.db.exec('ALTER TABLE interview_knowledge_docs ADD COLUMN collection_id TEXT REFERENCES interview_knowledge_collections(id) ON DELETE CASCADE');
+                } catch (e) { /* column already exists */ }
+                this.db.exec(`
+                    CREATE INDEX IF NOT EXISTS idx_interview_knowledge_docs_collection
+                        ON interview_knowledge_docs(collection_id);
+                `);
+                // Single-row state: which collection retrieval scopes to right
+                // now. A dedicated table rather than SettingsManager, which is
+                // typed against a fixed key set — keeping this feature's state
+                // entirely inside its own tables, per the spec's "own storage"
+                // principle. NULL = search every document (today's flat
+                // behavior, so an install with zero collections is unchanged).
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS interview_knowledge_state (
+                        id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                        active_collection_id TEXT REFERENCES interview_knowledge_collections(id) ON DELETE SET NULL
+                    );
+                `);
+                this.db.pragma('user_version = 33');
+            } catch (e) {
+                console.error('[DatabaseManager] v33 interview_knowledge_collections failed (leaving version at 32 to retry next launch):', e);
+                return;
+            }
+        }
+
+        if (version < 34) {
+            console.log('[DatabaseManager] Applying migration v33 → v34: interview_knowledge_docs.doc_type');
+            try {
+                // Lets retrieval weight a chunk toward a question that clearly
+                // asks about the company, the interviewer, or the role, rather
+                // than treating every document as equally relevant to every
+                // question (electron/services/interviewKnowledge/docTypeAffinity.ts).
+                // Default 'other' — an untyped doc is neither boosted nor
+                // penalized, so existing docs behave exactly as before.
+                try {
+                    this.db.exec("ALTER TABLE interview_knowledge_docs ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'other'");
+                } catch (e) { /* column already exists */ }
+                this.db.pragma('user_version = 34');
+            } catch (e) {
+                console.error('[DatabaseManager] v34 interview_knowledge_docs.doc_type failed (leaving version at 33 to retry next launch):', e);
+                return;
+            }
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 

@@ -45,8 +45,20 @@ import type { AutoAnswerQuestion, AutoAnswerTelemetryEvent } from './AutoAnswerT
 
 /** Interviewer-side prefilter: a candidate that is nothing but acknowledgements never costs a judge call. */
 export const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh|ok(?:ay)?|right|sure|cool|got it|i see|nice|great|perfect|exactly|interesting|makes sense|sounds good|true|correct|wow|oh|ah|hm+|haha+|alright|of course|fair enough|no problem|totally|absolutely|definitely|indeed|good|fine)[\s,.!?-]*){1,4}$/i;
-/** The interviewer must be quiet this long before the judge is consulted. Unfitted placeholder. */
-export const STABILITY_MS = 900;
+/**
+ * The interviewer must be quiet this long before the judge is consulted.
+ *
+ * History: 900ms (original) -> 2000ms (2026-09, teleprompter rework, "~2s of
+ * quiet" direction) -> 1200ms (2026-09, same week, after live latency testing
+ * showed the full response chain — this wait + retrieval/generation + reveal
+ * — felt too slow end-to-end with no manual override left as a fallback).
+ * 1200ms is a middle ground: still meaningfully calmer than the original
+ * 900ms default, but a real ~800ms cut off the 2000ms value once it was
+ * actually felt live. Tune against real sessions rather than assuming this
+ * exact value is final — this is a deliberate behavior tradeoff (speed vs.
+ * risk of firing on a mid-sentence breath), not a fixed constant.
+ */
+export const STABILITY_MS = 1200;
 /**
  * Quiet needed before the judge is ASKED, as opposed to before the answer is
  * COMMITTED (that stays STABILITY_MS).
@@ -63,6 +75,12 @@ export const STABILITY_MS = 900;
  * only the CHEAP call: the judge is ~2.2k tokens on flash-lite and never
  * touches the answer engine, whereas prefetching the ANSWER early would take
  * activeMode out of idle and park the real dispatch behind a junk generation.
+ *
+ * Unchanged by the STABILITY_MS bump above: this is an ABSOLUTE "has the
+ * interviewer paused at all" threshold, not STABILITY_MS-relative — it fires
+ * at the same 120ms regardless of how long the full commit wait is. A longer
+ * STABILITY_MS only gives the ~1.3s judge call MORE headroom to finish before
+ * the (now 2000ms) commit point, so this stays correct without adjustment.
  */
 export const EARLY_JUDGE_MS = 120;
 /** A provider endpoint (speech_final / <end>) confirms the stop: shorten the wait. */
@@ -96,11 +114,22 @@ export const FALLBACK_INTERROGATIVE = /^(?:(?:ok(?:ay)?|so|and|now|alright|well)
  * the thing the judge replaced because it cannot see declarative tasks. So
  * "why did you choose Postgres?" got the speedup and "your task is to
  * recreate this game in React" did not: the case the feature exists for was
- * the one case that never benefited. Now the ration is TIME, not shape — at
- * most one prefetch per window, so a long meeting cannot spend more than a
- * bounded number of generations no matter how it is phrased.
+ * the one case that never benefited. Now the ration is TIME, not shape.
+ *
+ * Cut from 25_000 to 3_000 (2026-09, latency-focused rework), then to 500
+ * (same night, explicit "3 seconds is too much" direction): with no manual
+ * buttons left, EVERY question the user hears goes through this path. The
+ * engine's own idle-only/no-overlapping-speculation guards (see
+ * maybePrefetch and consult() above) are what actually prevent wasted/
+ * stacked generations, not this interval — this interval only bounds
+ * worst-case COST, not correctness, so lowering it further is a pure
+ * cost-for-latency trade, not a stability risk. 500ms still exists (rather
+ * than 0) purely to stop a true same-tick double-fire on a single stoppage
+ * event from paying for two prefetches of the literal same candidate; it is
+ * far too short to meaningfully throttle distinct questions in any normal
+ * back-and-forth pace.
  */
-export const PREFETCH_MIN_INTERVAL_MS = 25_000;
+export const PREFETCH_MIN_INTERVAL_MS = 500;
 /**
  * How long after an automatic answer a manual press still counts as "that
  * answer was not good enough". Long enough for the user to read it and
@@ -150,6 +179,21 @@ export const RETRY_TTL_MS = 8000;
  * was drafted against two thirds of the spec. Unfitted placeholder.
  */
 export const PENDING_MAX_AGE_MS = 90_000;
+/**
+ * Circuit breaker (2026-09, "nothing should crash the app — cut a runaway
+ * loop off properly" — explicit disaster-recovery request). See the
+ * `dispatchTimestamps`/`circuitBreakerUntil` fields below for the full
+ * rationale: this is a pure safety net for a bug class that has never been
+ * observed, not a tuning knob for normal operation. 5 dispatches within 10s
+ * is already far beyond anything a real conversation could produce (each
+ * one requires real speech plus a stability wait), so this window is
+ * deliberately generous — it only exists to catch a genuine runaway, not to
+ * throttle legitimate back-to-back questions.
+ */
+export const CIRCUIT_BREAKER_WINDOW_MS = 10_000;
+export const CIRCUIT_BREAKER_MAX_DISPATCHES = 5;
+/** How long the breaker stays open once tripped — long enough that a transient bug's storm has certainly ended, short enough that a real false trip self-heals inside one meeting. */
+export const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
 
 export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
@@ -196,6 +240,18 @@ export interface SimpleAutoAnswerHost {
     logContent?(label: string, text: string): void;
 }
 
+/**
+ * Trigger-side stage log (2026-09, latency debugging): SimpleAutoAnswer had
+ * telemetry (`emit`) but nothing printed to the console, so a MEASURE_LATENCY
+ * trace only ever showed the generation side (LLMHelper.stream) starting at
+ * some unexplained offset — the wait-for-quiet + judge time before dispatch
+ * was invisible. Gated identically to LLMHelper's `_stage`/`_measure` so one
+ * env var shows the WHOLE chain: interviewer stops -> judged -> dispatched ->
+ * (LLMHelper stages) -> first token.
+ */
+const _measure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
+function _atrace(line: string): void { if (_measure) console.log(`[AutoAnswer:trace] ${line}`); }
+
 export class SimpleAutoAnswerEngine {
     private pending: Array<{ text: string; at: number; speaker?: string; glueNext?: boolean }> = [];
     /** Latest interviewer interim — the evidence for whether a final cut a word in half. */
@@ -219,6 +275,20 @@ export class SimpleAutoAnswerEngine {
     private lastPrefetchAt: number | null = null;
     /** A dispatch waiting on a busy engine, so onEngineIdle can wake it immediately. */
     private parkedAttempt: (() => void) | null = null;
+    /**
+     * Circuit breaker (2026-09, explicit "disaster recovery" request): a
+     * pure safety net, not a behavior change — in ANY normal conversation
+     * this can never trip (a real question requires actual speech plus
+     * STABILITY_MS of quiet before it even reaches dispatch, so 5 genuine
+     * dispatches inside 10s is not humanly producible). It exists purely to
+     * catch a future bug class this engine has no other defense against: a
+     * runaway loop that keeps calling dispatch() far faster than any real
+     * conversation could, which could otherwise pile up overlapping/stacked
+     * generations. Timestamps of the last few real dispatches, oldest first.
+     */
+    private dispatchTimestamps: number[] = [];
+    /** Set to a future clock time while the breaker is open; dispatch() is refused until then. */
+    private circuitBreakerUntil = 0;
     /** A positive verdict superseded by still-arriving transcript — see HELD_MAX_AGE_MS. */
     private held: {
         id: string; key: string; text: string;
@@ -386,6 +456,7 @@ export class SimpleAutoAnswerEngine {
         });
         this.lastJudgedKey = key;
         this.host.logContent?.(`judging ${id} (${words}w)`, candidate);
+        _atrace(`${id} quiet-window fired (${early ? 'early' : 'commit'}, ${words}w) — sending to judge`);
         // Key any speculation the engine starts on its own interims to THIS
         // candidate, so the dispatch below can claim it by id.
         this.host.noteCandidate?.(id, this.sequence);
@@ -504,7 +575,18 @@ export class SimpleAutoAnswerEngine {
             // Near-legacy fallback: a trailing '?', or — on providers that
             // never guarantee punctuation — an interrogative-led utterance.
             const interrogative = FALLBACK_INTERROGATIVE.test(candidate);
-            if (/\?\s*$/.test(candidate) || (!this.punctuationGuaranteed && interrogative)) {
+            const willFallbackDispatch = /\?\s*$/.test(candidate) || (!this.punctuationGuaranteed && interrogative);
+            // "Just hangs, nothing displayed" (2026-09): this branch previously had
+            // NO console-visible trace at all for timeout/error/unparseable outcomes
+            // — only a telemetry emit() (not printed) and, IF the fallback below
+            // fires, a log line. A candidate that doesn't end in '?' and doesn't open
+            // with an interrogative word (common for a multi-sentence question whose
+            // LAST clause is a trailing remark, e.g. "...documents? All right.") gets
+            // NO fallback and therefore NO output whatsoever — indistinguishable from
+            // the judge call still being in flight. Trace unconditionally so a
+            // timeout/error is visibly different from "still waiting".
+            _atrace(`${id} judge ${outcome} after ${judgeMs}ms — ${willFallbackDispatch ? 'fallback dispatch (trailing ? or interrogative lead)' : 'NO fallback (silently dropped — candidate has neither a trailing ? nor an interrogative lead)'}`);
+            if (willFallbackDispatch) {
                 this.host.log?.(`[AutoAnswer:simple] judge ${outcome} — fallback dispatch`);
                 this.deliver(id, candidate, 0.9, 'general_question', committedAt);
             }
@@ -515,6 +597,7 @@ export class SimpleAutoAnswerEngine {
             judgeIsAsk: verdict.isAsk, judgeDirectedAtUser: verdict.directedAtUser,
             dialogueAct: verdict.act, answerability: verdict.answerability,
         });
+        _atrace(`${id} judge verdict in ${judgeMs}ms — isAsk=${verdict.isAsk} act=${verdict.act} answerability=${verdict.answerability}`);
         const route = routeForVerdict(verdict);
         this.host.logContent?.(
             `verdict ${id} → ${route.route === 'evaluate' ? route.action : route.route}`
@@ -581,6 +664,32 @@ export class SimpleAutoAnswerEngine {
                 }
                 this.parkedAttempt = attempt;
                 this.retryTimer = this.clock.setTimeout(attempt, RETRY_MS);
+                return;
+            }
+            // Circuit breaker (see CIRCUIT_BREAKER_* constants and the
+            // dispatchTimestamps field for the full rationale): checked here,
+            // the actual dispatch chokepoint, so it catches a runaway
+            // regardless of which path fed it — judge verdict, fallback
+            // dispatch, or a held/superseded verdict re-applying.
+            const now = this.clock.now();
+            if (now < this.circuitBreakerUntil) {
+                this.parkedAttempt = null;
+                this.host.log?.(`[AutoAnswer:simple] CIRCUIT BREAKER OPEN — dropping dispatch for ${id} (reopens in ${Math.ceil((this.circuitBreakerUntil - now) / 1000)}s)`);
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'circuit_breaker_open', answerability });
+                return;
+            }
+            this.dispatchTimestamps.push(now);
+            this.dispatchTimestamps = this.dispatchTimestamps.filter((t) => now - t <= CIRCUIT_BREAKER_WINDOW_MS);
+            if (this.dispatchTimestamps.length > CIRCUIT_BREAKER_MAX_DISPATCHES) {
+                this.circuitBreakerUntil = now + CIRCUIT_BREAKER_COOLDOWN_MS;
+                this.dispatchTimestamps = [];
+                this.parkedAttempt = null;
+                console.error(
+                    `[AutoAnswer:simple] CIRCUIT BREAKER TRIPPED — ${CIRCUIT_BREAKER_MAX_DISPATCHES + 1} dispatches within ${CIRCUIT_BREAKER_WINDOW_MS}ms `
+                    + `(not humanly possible from real conversation — this indicates a runaway loop). `
+                    + `Pausing auto-answer for ${CIRCUIT_BREAKER_COOLDOWN_MS / 1000}s rather than let it keep firing.`
+                );
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'circuit_breaker_tripped', answerability });
                 return;
             }
             this.parkedAttempt = null;

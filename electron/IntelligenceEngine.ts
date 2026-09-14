@@ -735,7 +735,33 @@ export class IntelligenceEngine extends EventEmitter {
 
     // Fires speculative LLM inference on a stable high-confidence interviewer partial.
     // Debounced so rapid word-by-word partials don't spawn multiple streams.
+    //
+    // DISABLED (2026-09, confirmed dead weight — live-verified, not a guess):
+    // this legacy mechanism predates SimpleAutoAnswerEngine (the judge/
+    // STABILITY_MS pipeline) and runs on its OWN independent timer/ID scheme
+    // (SPECULATIVE_MIN_WORDS/triggerCooldown here vs. STABILITY_MS/judgeSeq
+    // there). It calls runWhatShouldISay(..., { speculative: true }), which
+    // is coded to run the FULL pipeline (retrieval, LLM call, complete
+    // latency trace — confirmed in a live log) and then explicitly SKIP
+    // finalizing/emitting to the renderer (`if (!options?.speculative) {
+    // ...finalize... }`), holding the result in `this.speculativeText` for a
+    // later "adoption" that depends on `currentAutoCandidateId` matching
+    // whatever SimpleAutoAnswerEngine's own, separately-generated candidate
+    // id happens to be at dispatch time. In practice these rarely line up,
+    // so this mechanism burns a full LLM call + retrieval pass per
+    // qualifying interim with NO visible benefit — the user never sees this
+    // answer, and the real judge-approved dispatch pays the full sequential
+    // cost anyway, from scratch, regardless. Beyond being pure waste, it is
+    // a SECOND independent source of load on the same retrieval/LLM/
+    // embedding pipeline already fought over rate limits and stability all
+    // night. Early-return kept isolated to this one function (not deleted)
+    // so the mechanism is easy to fully remove later, or to properly wire
+    // to SimpleAutoAnswerEngine's own candidate-id scheme if it's ever worth
+    // rebuilding as a real head-start rather than a parallel, disconnected
+    // generation.
     private maybeSpeculate(segment: TranscriptSegment): void {
+        return;
+        // eslint-disable-next-line no-unreachable
         if (this.activeMode !== 'idle' && this.activeMode !== 'assist') return;
 
         // Snapshot values now — STT adapters may mutate the same segment object in place.
@@ -1149,9 +1175,18 @@ export class IntelligenceEngine extends EventEmitter {
     private completeSpeculativeRun(
         generationId: number, question: string | undefined, confidence: number, text: string,
         writeDecision: SessionWriteDecision | undefined,
+        alreadyStreamedLive: boolean = false,
     ): string {
         const finished: SpeculativeAnswer = { generationId, question: question || 'inferred', confidence, text, writeDecision };
-        const adoptedInFlight = this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId;
+        // alreadyStreamedLive is OR'd in deliberately: if real tokens already
+        // reached the renderer under this generationId, that row MUST be
+        // finalized (recorded + given its 'done' event) no matter what
+        // speculativeAdoptedGenerationId says by now — something else (a
+        // manual press) may have reset it in the meantime, but the user is
+        // already looking at a partial answer that needs closing out, not a
+        // fresh discard.
+        const adoptedInFlight = alreadyStreamedLive
+            || (this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId);
         if (this.speculativeAdoptedGenerationId === generationId) this.speculativeAdoptedGenerationId = null;
         if (adoptedInFlight) {
             this.speculativeText = null;
@@ -1163,7 +1198,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.speculativeTextExpiry = Date.now() + this.triggerCooldown + 500;
         }
         this.setMode('idle');
-        if (adoptedInFlight) this.revealSpeculativeAnswer(finished, this.automaticGenerationId === generationId);
+        if (adoptedInFlight) this.revealSpeculativeAnswer(finished, this.automaticGenerationId === generationId, alreadyStreamedLive);
         return text;
     }
 
@@ -1178,7 +1213,7 @@ export class IntelligenceEngine extends EventEmitter {
      * cut short is shown, like any truncated live answer, but it must not
      * become prior_assistant_responses evidence for the next turn.
      */
-    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean): void {
+    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean, alreadyStreamedLive: boolean = false): void {
         let text = finished.text;
         // A speculative run is never `isCoding` (see runWhatShouldISay), so it
         // gets neither the StreamingSpecStripper nor the live path's
@@ -1204,39 +1239,80 @@ export class IntelligenceEngine extends EventEmitter {
             console.warn('[IntelligenceEngine] Prefetched answer was empty — nothing to reveal');
             return;
         }
-        // The prefetch never emitted, so the renderer never saw its generation.
-        // Mint a fresh one: the engine is idle here, so nothing is superseded.
-        const generationId = ++this.currentGenerationId;
-        this.automaticGenerationId = automatic ? generationId : null;
-        console.log(`[IntelligenceEngine] Revealing the prefetched answer (${text.length} chars, prefetch gen ${finished.generationId} → ${generationId})`);
-        this.emit('suggested_answer_token', text, finished.question, finished.confidence, generationId);
-        this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer');
-        if (finished.writeDecision?.policy !== 'do_not_store') {
-            this.session.pushUsage({ type: 'assist', timestamp: Date.now(), question: finished.question, answer: text });
-            // THE ADOPTED ANSWER'S ONLY RECORDING POINT.
-            //
-            // recordLiveTurn has exactly three call sites — the runWhatShouldISay,
-            // runAssistMode and runManualAnswer wrappers — and BOTH adoption
-            // branches in handleSuggestionTriggerInner `return` before reaching
-            // runWhatShouldISay. So the answer the user actually sees, on the most
-            // common Auto Answer path, never entered the conversation ring: the
-            // wrapper's "a draft the user never saw is not part of the
-            // conversation" reasoning is true for a DISCARDED prefetch and false
-            // for an adopted one.
-            //
-            // This method is where an adopted answer becomes user-visible (its
-            // only two callers are the two adoption paths), so it is the one
-            // place that cannot be bypassed. Gated on the same do_not_store
-            // decision as the session write directly above: a turn the session
-            // declined to store must not reach the ring either.
-            //
-            // No imagePaths: a speculative run is always started with
-            // `undefined` for them, so there is no screen to transcribe.
-            this.recordLiveTurn(text, undefined, finished.question, 0);
-        } else {
-            console.warn(`[IntelligenceEngine] Prefetched answer revealed but not stored (${finished.writeDecision.reason ?? 'do_not_store'})`);
-        }
-        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId);
+        // Two ways to get here. (a) alreadyStreamedLive: real tokens already
+        // reached the renderer under finished.generationId while this run was
+        // still generating (2026-09-14 latency fix, see emitChunk) — reuse
+        // THAT id and just finalize the row, exactly like the live
+        // (non-speculative) path already does ("the final 'suggested_answer'
+        // replaces the streamed row by id", see the comment above this
+        // method's streaming call site). Minting a new id here would orphan
+        // the row the user is already watching. (b) the prefetch never
+        // streamed anything (adopted only after it fully finished, or never
+        // adopted until reuse) — mint a fresh id and fake-type it out below,
+        // exactly as before.
+        const generationId = alreadyStreamedLive ? finished.generationId : ++this.currentGenerationId;
+        if (!alreadyStreamedLive) this.automaticGenerationId = automatic ? generationId : null;
+        console.log(`[IntelligenceEngine] ${alreadyStreamedLive ? 'Finalizing the live-streamed prefetched answer' : 'Revealing the prefetched answer'} (${text.length} chars, prefetch gen ${finished.generationId} → ${generationId})`);
+        // Chunked, paced emission (2026-09, "sudden full text popup" — live-
+        // reported, and a plausible contributor to the repeated "Maximum
+        // update depth exceeded" loop seen in the renderer): this used to
+        // emit the ENTIRE answer as one massive "token", then fire the done
+        // event essentially the same tick. The renderer's reveal pacer never
+        // got a single animation frame to run before flushImmediatelyOnComplete
+        // short-circuited it, so the whole answer committed to React state in
+        // one shot instead of the token-by-token reveal a normal live stream
+        // gets — visually a sudden pop, and a much larger single state
+        // commit than the renderer's streaming path is normally exercised
+        // with. Splitting into small chunks with a real gap between them
+        // lets the SAME reveal-pacer machinery already used for live
+        // streaming run normally here too, and keeps each individual commit
+        // small. The finish() continuation below is the ORIGINAL tail logic,
+        // unchanged, just deferred until after the chunks are sent.
+        const finish = () => {
+            this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer');
+            if (finished.writeDecision?.policy !== 'do_not_store') {
+                this.session.pushUsage({ type: 'assist', timestamp: Date.now(), question: finished.question, answer: text });
+                // THE ADOPTED ANSWER'S ONLY RECORDING POINT.
+                //
+                // recordLiveTurn has exactly three call sites — the runWhatShouldISay,
+                // runAssistMode and runManualAnswer wrappers — and BOTH adoption
+                // branches in handleSuggestionTriggerInner `return` before reaching
+                // runWhatShouldISay. So the answer the user actually sees, on the most
+                // common Auto Answer path, never entered the conversation ring: the
+                // wrapper's "a draft the user never saw is not part of the
+                // conversation" reasoning is true for a DISCARDED prefetch and false
+                // for an adopted one.
+                //
+                // This method is where an adopted answer becomes user-visible (its
+                // only two callers are the two adoption paths), so it is the one
+                // place that cannot be bypassed. Gated on the same do_not_store
+                // decision as the session write directly above: a turn the session
+                // declined to store must not reach the ring either.
+                //
+                // No imagePaths: a speculative run is always started with
+                // `undefined` for them, so there is no screen to transcribe.
+                this.recordLiveTurn(text, undefined, finished.question, 0);
+            } else {
+                console.warn(`[IntelligenceEngine] Prefetched answer revealed but not stored (${finished.writeDecision.reason ?? 'do_not_store'})`);
+            }
+            this.emit('suggested_answer', text, finished.question, finished.confidence, generationId);
+        };
+        // Already live-streamed: the renderer has real tokens on screen and
+        // the cleaned final text above (stripVerificationSpec/cleanAnswerArtifacts)
+        // replaces the streamed row the same way the live path's own final
+        // emit does — no re-send of the whole text as fake-paced chunks.
+        if (alreadyStreamedLive) { finish(); return; }
+        const CHUNK_CHARS = 12;
+        const CHUNK_DELAY_MS = 20;
+        let offset = 0;
+        const sendNextChunk = () => {
+            if (offset >= text.length) { finish(); return; }
+            const chunk = text.slice(offset, offset + CHUNK_CHARS);
+            offset += CHUNK_CHARS;
+            this.emit('suggested_answer_token', chunk, finished.question, finished.confidence, generationId);
+            setTimeout(sendNextChunk, CHUNK_DELAY_MS);
+        };
+        sendNextChunk();
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -1529,6 +1605,19 @@ export class IntelligenceEngine extends EventEmitter {
         // recorded, no leak.
         const wtaTrace = beginTrace(typeof question === 'string' ? question : '');
         const isSpeculative = options?.speculative === true;
+        // Live-streaming-on-adoption (2026-09-14, latency fix): a prefetch used
+        // to accumulate its ENTIRE answer silently and only appear after full
+        // completion (then get fake-typed out by revealSpeculativeAnswer). If
+        // the judge adopts this run while it's still generating, emitChunk
+        // below flips speculativeLiveStarted once and starts relaying real
+        // tokens to the UI — this is checked ONCE per run and never reverted,
+        // so a stream the user already started watching never goes silent
+        // again mid-sentence even if speculativeAdoptedGenerationId later
+        // changes for an unrelated reason (e.g. a manual press resetting it).
+        // completeSpeculativeRun reads this to skip the redundant fake-paced
+        // reveal and to guarantee the row still gets finalized.
+        let speculativeLiveStarted = false;
+        const speculativePendingChunks: string[] = [];
         const skipCooldown = options?.skipCooldown === true;
         const forceFresh = options?.forceFresh === true;
 
@@ -3978,6 +4067,27 @@ export class IntelligenceEngine extends EventEmitter {
             let liveDeadlineFired = false;
 
             const emitChunk = (chunk: string) => {
+                // Live-streaming-on-adoption (2026-09-14): a speculative run's
+                // chunks are silently buffered — exactly today's behavior —
+                // until the judge adopts this generation. speculativeLiveStarted
+                // is checked once per run and never reverts (see its
+                // declaration), so once we commit to showing this stream we
+                // never go back to buffering, even if something else resets
+                // speculativeAdoptedGenerationId later (e.g. a manual press).
+                if (isSpeculative && !speculativeLiveStarted) {
+                    if (this.speculativeAdoptedGenerationId !== generationId) {
+                        speculativePendingChunks.push(chunk);
+                        return;
+                    }
+                    speculativeLiveStarted = true;
+                    // Everything generated before adoption was never shown —
+                    // flush it as one immediate opening burst so the answer
+                    // doesn't visibly start mid-sentence, then fall through to
+                    // emit the current chunk live like any other stream.
+                    const backlog = speculativePendingChunks.join('');
+                    speculativePendingChunks.length = 0;
+                    if (backlog) emitChunk(backlog);
+                }
                 commitFirstTokenMeasurement();
                 emittedStreamingToken = true;
                 openedStreamRow = true;
@@ -4087,7 +4197,15 @@ export class IntelligenceEngine extends EventEmitter {
                     // surfaces feed one map and must mean the same thing.
                     if (!isSpeculative) noteFirstToken();
                     fullAnswer += token;
-                    if (isSpeculative) return; // speculative prefetch never streams to UI
+                    // Speculative tokens now run through the SAME gating below
+                    // as a live stream (2026-09-14 latency fix) — codingGate is
+                    // always null for a speculative run (isCoding is forced
+                    // false, see its `!isSpeculative &&` guard above), so this
+                    // always lands in the plain-text else branch, exactly
+                    // mirroring the live path's scaffold-hold/canned-opener
+                    // handling. emitChunk decides whether any of this is
+                    // actually visible yet (see emitChunk: silently buffered
+                    // until the judge adopts this generation).
                     if (codingGate) {
                         const gated = codingGate.push(token);
                         if (gated) {
@@ -5995,7 +6113,7 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             if (isSpeculative) {
-                return this.completeSpeculativeRun(generationId, question, confidence, fullAnswer, wtaWriteDecision);
+                return this.completeSpeculativeRun(generationId, question, confidence, fullAnswer, wtaWriteDecision, speculativeLiveStarted);
             }
 
             // Keep the RAW answer (with the hidden <verification_spec>) for
