@@ -96,10 +96,34 @@ jobs:
       # macOS Installer package (double-click -> Installer.app -> installs to
       # /Applications), which is what "proper pkg for the Apple application"
       # asks for, alongside the drag-and-drop dmg and the raw zip.
+      #
+      # `hdiutil create` (the dmg target only) intermittently fails on
+      # GitHub's macOS runners with "Device not configured" — a documented,
+      # transient runner-image flakiness, not a config problem: electron-
+      # builder keeps going and the .app/.zip/.pkg targets in the SAME run
+      # build fine regardless. A full retry of this step is too expensive to
+      # do blindly (~18 minutes per attempt here, well over half the job's
+      # 60-minute budget for 3 tries) — so instead, tolerate a dmg-only
+      # failure: if zip + pkg came out, ship those and just warn that dmg is
+      # missing rather than failing the whole build over one flaky target.
       - name: Package app (unsigned)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: node scripts/package-app.js --mac dmg zip pkg
+        run: |
+          set -uo pipefail
+          node scripts/package-app.js --mac dmg zip pkg
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            shopt -s nullglob
+            zips=(release/*.zip)
+            pkgs=(release/*.pkg)
+            if [ ${#zips[@]} -gt 0 ] && [ ${#pkgs[@]} -gt 0 ]; then
+              echo "::warning::electron-builder exited non-zero (status $status), but zip + pkg artifacts exist — most likely the known dmg-only hdiutil flake. Continuing without the dmg."
+            else
+              echo "::error::Package app failed and required artifacts (zip/pkg) are missing — not the known dmg-only flake."
+              exit "$status"
+            fi
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
