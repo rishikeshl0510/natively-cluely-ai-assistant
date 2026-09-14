@@ -1,6 +1,6 @@
 name: Build macOS (unsigned, fork-safe)
 
-# Produces an UNSIGNED, unnotarized macOS build (dmg + zip, arm64 + x64).
+# Produces an UNSIGNED, unnotarized macOS build (dmg + zip + pkg, arm64 + x64).
 #
 # Fork-safe by design: the private `premium` submodule
 # (Natively-AI-assistant/natively-premium) is never fetched — a personal fork
@@ -91,10 +91,15 @@ jobs:
       # identity: null + hardenedRuntime: false; CSC_IDENTITY_AUTO_DISCOVERY=false
       # is belt-and-braces so electron-builder never even probes for a local
       # signing identity (there is none on this runner anyway).
+      #
+      # `pkg` on top of package.json's configured dmg+zip targets: a standard
+      # macOS Installer package (double-click -> Installer.app -> installs to
+      # /Applications), which is what "proper pkg for the Apple application"
+      # asks for, alongside the drag-and-drop dmg and the raw zip.
       - name: Package app (unsigned)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: node scripts/package-app.js --mac
+        run: node scripts/package-app.js --mac dmg zip pkg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -103,4 +108,5 @@ jobs:
           path: |
             release/*.dmg
             release/*.zip
+            release/*.pkg
           if-no-files-found: error

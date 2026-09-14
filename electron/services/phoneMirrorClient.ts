@@ -41,7 +41,26 @@ export const PHONE_MIRROR_HTML = `<!doctype html>
         display: grid;
         grid-template-rows: auto 1fr auto;
         min-height: 100dvh;
-        padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom);
+        /* Left/right safe-area insets matter once the phone is rotated: a
+           notch/Dynamic Island that sits harmlessly above the status bar in
+           portrait moves to the LEFT or RIGHT edge in landscape and would
+           otherwise clip the top bar and card edges. Always applied (not
+           landscape-gated) since it's 0 on non-notched devices in any
+           orientation. */
+        padding: env(safe-area-inset-top) calc(env(safe-area-inset-right) + 14px) env(safe-area-inset-bottom) calc(env(safe-area-inset-left) + 14px);
+      }
+      /* ── Landscape (phone rotated sideways) ─────
+         A phone in landscape is short and wide: unconstrained cards would
+         stretch a line of text across the full width (hurts readability) and
+         the portrait-tuned vertical chrome (topbar padding, empty-state
+         height) eats a much bigger share of the little height available.
+         max-height caps this to actual phones in landscape, not a wide
+         desktop/tablet browser window. */
+      @media (orientation: landscape) and (max-height: 600px) {
+        .app { max-width: 720px; margin: 0 auto; }
+        .topbar { padding: 10px 4px 8px; }
+        .empty { min-height: 30dvh; }
+        .content .codeblock pre { max-height: 34vh; }
       }
       /* ── Top bar ─────────────────────────────── */
       .topbar {
