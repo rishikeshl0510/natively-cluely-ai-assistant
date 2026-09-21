@@ -596,12 +596,32 @@ ${entries}
         // Vision-first: prefer extractedText/visibleSummary from vision pipeline. Fall
         // back to legacy ocrText only if no vision content is provided (e.g. older test
         // fixtures or a future opt-in OCR mode).
-        const maxLength = 2000;
+        //
+        // 2026-09-15: raised 2000 -> 4000. A real coding-interview screen
+        // (problem statement + multiple worked examples + constraints) can
+        // legitimately exceed 2000 chars of verbatim transcription — at the
+        // old cap, the tail of a long question (often the constraints, or
+        // the last example) was silently cut. 4000 is still bounded, just
+        // less likely to cut a real question mid-sentence.
+        const maxLength = 4000;
         const rawText = screenContext.extractedText
             || screenContext.visibleSummary
             || screenContext.ocrText
             || '';
         const truncated = rawText.length > maxLength ? rawText.substring(0, maxLength) + '...' : rawText;
+        // codeBlocks (2026-09-15 fix): the vision prompt already extracts
+        // code as its OWN clean, verbatim-delimited array
+        // (STRUCTURED_EXTRACTION_SYSTEM_PROMPT's `codeBlocks` field,
+        // visionPrompts.ts) — this block used to compute it and then never
+        // use it, so a model reading this context had to re-locate code
+        // inside the flat extractedText blob instead of reading it as its
+        // own clearly-bounded section. Appended separately, each block
+        // fenced, so exact code is unambiguous even if extractedText's
+        // transcription of the surrounding UI chrome is noisy.
+        const codeBlocksText = Array.isArray(screenContext.codeBlocks) && screenContext.codeBlocks.length
+            ? '\n\nCODE BLOCKS (verbatim, extracted separately from the surrounding text):\n'
+                + screenContext.codeBlocks.map((b, i) => `--- code block ${i + 1} ---\n${b}`).join('\n')
+            : '';
 
         const sourceLabel = screenContext.source === 'ocr_legacy' ? 'screen_ocr_legacy' : 'screen_vision';
         const isVision = sourceLabel === 'screen_vision';
@@ -629,7 +649,10 @@ ${entries}
         // conversation — so it gets DOM's stricter full-block-redaction policy
         // (forceRedactOnInjection=true), not transcript's inline-only
         // neutralization.
-        const sanitizedContent = this.escapePromptInjection(this.escapeUserContent(truncated), true, 'screen_context');
+        // codeBlocksText appended BEFORE sanitization — it's the same
+        // untrusted screen content as truncated, just extracted separately,
+        // so it must go through the identical injection-escaping path.
+        const sanitizedContent = this.escapePromptInjection(this.escapeUserContent(truncated + codeBlocksText), true, 'screen_context');
         const isRedacted = sanitizedContent === INJECTION_REDACTION_MESSAGE;
         const evidenceText = isRedacted ? '[REDACTED]' : sanitizedContent.substring(0, 100);
 
@@ -637,7 +660,10 @@ ${entries}
             type: 'screen_context',
             trustLevel: TrustLevel.UNTRUSTED_SCREEN,
             source: sourceLabel,
-            tokenBudget: 600,
+            // Raised from 600 alongside maxLength (4000 chars, ~1000-1300
+            // tokens depending on content) so the larger cap isn't silently
+            // re-truncated by the token budget enforcement downstream.
+            tokenBudget: 1400,
             recency: Date.now() - screenContext.timestamp,
             content: `<screen_context trust_level="untrusted_visual_evidence" source="${sourceLabel}">
 ${metaLine}${heading}

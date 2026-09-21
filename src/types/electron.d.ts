@@ -421,6 +421,7 @@ export interface ElectronAPI {
   knowledgeDocAddFile: (params?: { collectionId?: string | null; docType?: string }) => Promise<{ success: boolean; doc?: { id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }; cancelled?: boolean; error?: string }>
   knowledgeDocAddFolder: (params?: { collectionId?: string | null }) => Promise<{ success: boolean; added?: number; skipped?: number; errors?: Array<{ path: string; reason: string }>; cancelled?: boolean; error?: string }>
   knowledgeDocList: (collectionId?: string | null) => Promise<{ success: boolean; docs: Array<{ id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }>; error?: string }>
+  knowledgeDocGet: (id: string) => Promise<{ success: boolean; doc?: { id: string; title: string; content: string; contentSha256: string; source: string; createdAt: string; collectionId: string | null; docType: string }; error?: string }>
   knowledgeDocDelete: (id: string) => Promise<{ success: boolean; error?: string }>
   knowledgeDocGetStatus: (id: string) => Promise<{ success: boolean; status: string; chunkCount: number; error?: string }>
   knowledgeCollectionCreate: (params: { name: string; interviewerName?: string; contextNotes?: string }) => Promise<{ success: boolean; collection?: { id: string; name: string; interviewerName: string | null; contextNotes: string | null; createdAt: string }; error?: string }>

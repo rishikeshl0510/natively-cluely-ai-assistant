@@ -95,6 +95,14 @@ export interface SuggestionTrigger {
      * PromptAssembler compatibility" — same bridge, same justification).
      */
     screenContext?: any;
+    /**
+     * An auto-matched skill (matchSkillForMessage against the committed
+     * question text, resolved right before dispatch — same timing as
+     * screenContext above). Additive only: never changes the planner's
+     * answer/clarify/recap/follow_up/brainstorm decision, just rides along
+     * as extra instructions for whichever kind is chosen.
+     */
+    activeSkill?: { id: string; name: string; promptBlock: string };
 }
 
 // Context item matching Swift ContextManager structure

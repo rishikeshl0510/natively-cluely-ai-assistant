@@ -235,7 +235,7 @@ export class IntelligenceManager extends EventEmitter {
     }
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
-        options: { reuseSpeculative: boolean; screenContext?: any },
+        options: { reuseSpeculative: boolean; screenContext?: any; activeSkill?: { id: string; name: string; promptBlock: string } },
     ): Promise<void> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }

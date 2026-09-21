@@ -3046,6 +3046,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   knowledgeDocAddFile: (params?: { collectionId?: string | null; docType?: string }) => ipcRenderer.invoke('knowledge-doc:add-file', params),
   knowledgeDocAddFolder: (params?: { collectionId?: string | null }) => ipcRenderer.invoke('knowledge-doc:add-folder', params),
   knowledgeDocList: (collectionId?: string | null) => ipcRenderer.invoke('knowledge-doc:list', collectionId),
+  knowledgeDocGet: (id: string) => ipcRenderer.invoke('knowledge-doc:get', id),
   knowledgeDocDelete: (id: string) => ipcRenderer.invoke('knowledge-doc:delete', id),
   knowledgeDocGetStatus: (id: string) => ipcRenderer.invoke('knowledge-doc:get-status', id),
   // Collections (companies/interviews) grouping knowledge docs — same free-tier guarantee.

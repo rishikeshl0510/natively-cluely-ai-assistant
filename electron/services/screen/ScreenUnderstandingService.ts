@@ -92,6 +92,21 @@ export interface ScreenUnderstandingRequest {
   screenUnderstandingMode?: ScreenUnderstandingMode;
   technicalInterviewVisionFirst?: boolean;
   providerPolicy?: ProviderPolicy;
+  /**
+   * Overrides SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS for this call only.
+   * That constant exists to bound how long a USER WAITS for a live answer
+   * (see its own doc comment) — a background, non-blocking caller (live
+   * screen context's periodic capture, main.ts) has no user waiting on it
+   * and was inheriting that same 6s budget by accident. With a Gemini-first
+   * cascade of 3+ rungs sharing one 6s pie, each rung's timeout ate into
+   * what was left for the next, so EVERY rung timed out in sequence and the
+   * capture failed every time (confirmed live: gemini_flash_lite at
+   * ~3.6s, gemini_flash at ~2.2s, gemini_pro getting ~0ms — exactly
+   * FIRST_RUNG_BUDGET_SHARE's math on a 6s total, not per-provider
+   * timeouts). A background caller should set this to something realistic
+   * for a multi-rung cascade instead.
+   */
+  totalDeadlineMsOverride?: number;
 }
 
 export interface ProviderPolicy {
@@ -311,7 +326,11 @@ export class ScreenUnderstandingService {
       // the budget is not worth delaying the answer for; failing fast to "no
       // screen context" is the cheaper outcome, and the healthy case (a cloud
       // vision rung returning in 2-4s) never reaches this ceiling.
-      totalDeadlineMs: SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS,
+      // request.totalDeadlineMsOverride: see its own doc comment — a
+      // background, non-blocking caller (live screen context) is not
+      // subject to the "user is waiting" rationale this constant exists
+      // for, and was failing every multi-rung cascade by inheriting it.
+      totalDeadlineMs: request.totalDeadlineMsOverride ?? SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS,
       health: this.rungHealth,
     });
 

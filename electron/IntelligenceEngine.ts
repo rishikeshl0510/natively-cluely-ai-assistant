@@ -1115,6 +1115,7 @@ export class IntelligenceEngine extends EventEmitter {
             // case this is byte-identical to today's existing behavior.
             await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, {
                 screenContext: trigger.screenContext,
+                activeSkill: trigger.activeSkill,
             });
         } finally {
             this.nextRunIsAutomatic = false;
@@ -1347,7 +1348,7 @@ export class IntelligenceEngine extends EventEmitter {
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
-    }, options: { reuseSpeculative: boolean; context: string; screenContext?: any }): Promise<void> {
+    }, options: { reuseSpeculative: boolean; context: string; screenContext?: any; activeSkill?: { id: string; name: string; promptBlock: string } }): Promise<void> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -1361,6 +1362,7 @@ export class IntelligenceEngine extends EventEmitter {
             candidateGeneration: question.candidateGeneration,
             reuseSpeculative: options.reuseSpeculative,
             screenContext: options.screenContext,
+            activeSkill: options.activeSkill,
         });
     }
 

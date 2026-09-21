@@ -179,6 +179,18 @@ export class InterviewKnowledgeRetriever {
         return (db.prepare('SELECT * FROM interview_knowledge_docs WHERE collection_id = ? ORDER BY created_at ASC').all(collectionId) as KnowledgeDocRow[]).map(rowToDoc);
     }
 
+    /**
+     * Fetch one document by id, full content included — for the citation
+     * "open the source document" viewer. `id` here is the SAME `sourceId` a
+     * citation carries (agenticRetrieve.ts keys its chunk dedup on
+     * `${sourceId}:${chunkIndex}`, and sourceId is this table's own `id`
+     * column — no separate lookup table, no id translation needed).
+     */
+    public getById(id: string): KnowledgeDoc | null {
+        const row = this.getDb().prepare('SELECT * FROM interview_knowledge_docs WHERE id = ?').get(id) as KnowledgeDocRow | undefined;
+        return row ? rowToDoc(row) : null;
+    }
+
     public hasAnyDocs(collectionId?: string | null): boolean {
         try {
             return this.list(collectionId).length > 0;

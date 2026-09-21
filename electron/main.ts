@@ -3313,7 +3313,36 @@ export class AppState {
       // 1/3/4 return immediately. Resolved here, not inside IntelligenceEngine,
       // since screenshot capture is AppState territory.
       const screenContext = await this.resolveLiveScreenContextForAnswer().catch(() => undefined);
-      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, screenContext }).catch((error) => {
+      // Automatic skill matching for the live Auto-Answer path (previously
+      // only wired into the old manual-chat handler, which has no live UI
+      // path — skills were dead code on this path until now). Mirrors
+      // ipcHandlers.ts's manual-chat matching exactly (same matcher, same
+      // enabled-only filter, same buildPromptBlock cap) — additive only,
+      // never touches the planner's answer/clarify/recap/brainstorm
+      // decision, just rides along as extra instructions for whichever kind
+      // gets chosen. Synchronous + cheap (keyword matching, no LLM call),
+      // so unlike screenContext this needs no bounded-wait tier.
+      let activeSkill: { id: string; name: string; promptBlock: string } | undefined;
+      try {
+        const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+        const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
+        const enabledSkills = SkillsManager.getInstance().listSkills().filter((s: any) => s.enabled !== false);
+        const autoMatch = question.text ? matchSkillForMessage(question.text, enabledSkills) : null;
+        if (autoMatch) {
+          const autoSkill = SkillsManager.getInstance().getSkill(autoMatch.skillId);
+          if (autoSkill) {
+            activeSkill = {
+              id: autoSkill.id,
+              name: autoSkill.name,
+              promptBlock: SkillsManager.getInstance().buildPromptBlock(autoSkill),
+            };
+            console.log(`[Main] Auto-Answer skill auto-triggered: ${autoSkill.id} (matched "${autoMatch.matchedPhrase}")`);
+          }
+        }
+      } catch (skillErr: any) {
+        console.warn('[Main] Automatic skill matching failed, proceeding without:', skillErr?.message || skillErr);
+      }
+      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, screenContext, activeSkill }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
       });
     },
@@ -6181,6 +6210,7 @@ export class AppState {
     this.refreshLiveScreenContext().catch((err) => {
       console.warn('[LiveScreenContext] meeting-start refresh failed (non-fatal):', err?.message || err);
     });
+    this.startLiveScreenContextInterval();
 
     // If a previous endMeeting() is still draining STT in the background, wait
     // for it to finish before we boot a new session — otherwise the BG teardown
@@ -6503,6 +6533,7 @@ export class AppState {
     }
 
     this.cancelAutoAnswer();
+    this.stopLiveScreenContextInterval();
     // Cover the window between here and `_pendingTeardown` assignment, during which
     // the new in-flight-audio-init await below yields the event loop.
     this._endMeetingInFlight = true;
@@ -7480,9 +7511,40 @@ export class AppState {
   // behind it.
   private liveScreenContext: ScreenUnderstandingResult | null = null;
   private liveScreenContextRefreshPromise: Promise<void> | null = null;
+  private liveScreenContextIntervalTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly LIVE_SCREEN_CONTEXT_FRESH_MS = 15_000;
   private static readonly LIVE_SCREEN_CONTEXT_STALE_CEILING_MS = 45_000;
   private static readonly LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS = 700;
+
+  /**
+   * Periodic capture, independent of speech (2026-09-15, explicit direction
+   * — "screenshot irrespective of whether the speaker speaks or not, remove
+   * that gate"). Originally this only refreshed on the prefetch signal, tied
+   * to SimpleAutoAnswerEngine judging a candidate — so a candidate silently
+   * coding for two minutes with no interviewer speech never got a fresh
+   * capture, going stale exactly when the screen is most likely to have
+   * changed. Runs at the same cadence as the freshness window itself
+   * (LIVE_SCREEN_CONTEXT_FRESH_MS) so it never fires more often than a
+   * capture could actually go stale; refreshLiveScreenContext()'s own
+   * freshness check makes an extra tick harmless if the prefetch-signal
+   * trigger already refreshed recently — this is additive, not a
+   * replacement for that trigger.
+   */
+  private startLiveScreenContextInterval(): void {
+    this.stopLiveScreenContextInterval();
+    this.liveScreenContextIntervalTimer = setInterval(() => {
+      this.refreshLiveScreenContext().catch((err) => {
+        console.warn('[LiveScreenContext] periodic refresh failed (non-fatal):', err?.message || err);
+      });
+    }, AppState.LIVE_SCREEN_CONTEXT_FRESH_MS);
+  }
+
+  private stopLiveScreenContextInterval(): void {
+    if (this.liveScreenContextIntervalTimer) {
+      clearInterval(this.liveScreenContextIntervalTimer);
+      this.liveScreenContextIntervalTimer = null;
+    }
+  }
 
   private liveScreenContextGateOpen(): { open: boolean; mode?: string; scopesAllow?: boolean } {
     try {
@@ -7573,6 +7635,19 @@ export class AppState {
           // own doc comment for why.
           __providersOverride: buildGeminiOnlyVisionProviders(buildInputs),
         },
+        // BUG FIX (2026-09-15, "screenshot is taken but description never
+        // updates"): this call was inheriting SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS
+        // (6s), a budget that exists to bound a LIVE answer's latency — not
+        // relevant here, nothing is waiting on a background capture. Live
+        // trace showed every single capture failing: gemini_flash_lite
+        // timing out at ~3.6s, gemini_flash at ~2.2s, gemini_pro at ~0ms —
+        // each rung eating into the SAME shrinking 6s pie instead of getting
+        // a fair shot, so the whole Gemini-first cascade failed every time,
+        // every capture. 30s gives the 3-rung Gemini cascade (plus fallback
+        // to whatever else is configured) room to actually succeed; still
+        // bounded, not infinite, and never blocks anything since this whole
+        // method is fire-and-forget.
+        totalDeadlineMsOverride: 30_000,
       });
 
       // Deliberately NOT written through putScreenshotDescription /
@@ -7582,7 +7657,17 @@ export class AppState {
       // forward-looking store with its own freshness contract.
       if (result?.status === 'available') {
         this.liveScreenContext = result;
-        const summary = result.visibleSummary || result.extractedText || result.ocrText || '';
+        // BUG FIX (2026-09-15): was `visibleSummary || extractedText`, which
+        // shows a vague 1-2 sentence description ("describing what is
+        // happening") and NEVER the verbatim question/code text, since
+        // visibleSummary is populated on nearly every capture. extractedText
+        // is the verbatim transcription (per STRUCTURED_EXTRACTION_SYSTEM_PROMPT,
+        // visionPrompts.ts) — e.g. the actual coding question text on
+        // screen — and is what actually matters for a coding question.
+        // PromptAssembler.buildScreenContextBlock() already had this
+        // priority order correct for what feeds the ANSWERING model; this
+        // brings the on-screen display in line with it.
+        const summary = result.extractedText || result.visibleSummary || result.ocrText || '';
         if (summary) {
           try {
             this.sendToWindow(this.getMainWindow(), 'live-screen-context-updated', {

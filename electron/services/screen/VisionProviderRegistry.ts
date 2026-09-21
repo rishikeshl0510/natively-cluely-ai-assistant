@@ -81,20 +81,29 @@ export function buildVisionProviders(inputs: VisionProviderBuildInputs): VisionP
 }
 
 /**
- * Gemini-only provider list (docs/specs/live-screen-context-spec.md). Used
+ * Gemini-FIRST provider list (docs/specs/live-screen-context-spec.md). Used
  * via `understand()`'s existing `providerPolicy.__providersOverride` escape
- * hatch (`ScreenUnderstandingService.ts:263`, previously test-only) to pin
- * the automatic background screen-description capture to Gemini specifically
- * — the answering call it feeds is itself always a Gemini call
+ * hatch (`ScreenUnderstandingService.ts:263`, previously test-only) to prefer
+ * Gemini for the automatic background screen-description capture — the
+ * answering call it feeds is itself always a Gemini call
  * (`WhatToAnswerLLM.ts`), so keeping the description generator on the same
- * model family keeps the two calls consistent. Cascades flash-lite → flash →
- * pro (cheapest/fastest first, same ordering rationale as
- * `buildVisionProviders`) so a live capture still degrades gracefully if the
- * lead Gemini rung is unavailable, rather than failing outright with other
- * configured providers sitting unused.
+ * model family keeps the two calls consistent when Gemini is healthy.
+ *
+ * CHANGED (2026-09-15) from Gemini-ONLY to Gemini-FIRST-with-fallback: a
+ * live capture showed all three Gemini rungs timing out back to back
+ * (`all_vision_failed`, gemini_flash_lite/flash/pro all timed out,
+ * ~6s total) with zero fallback, since the old Gemini-only list had nothing
+ * else to try — the whole feature produced nothing for that capture even
+ * though other providers were configured and idle. Consistency-with-the-
+ * answering-model was never worth "no description at all" when Gemini has a
+ * bad moment; this still tries Gemini first (same rationale as before) but
+ * falls through to the SAME full chain `buildVisionProviders` uses for
+ * everything else, minus the Gemini rungs already attempted (no point
+ * re-trying them), so a Gemini outage degrades to "answers use a different
+ * vision model's wording" instead of "no screen context at all".
  *
  * `private_vision` mode returns ONLY local providers, same as
- * `buildVisionProviders` — Gemini is a cloud call and must never be reached
+ * `buildVisionProviders` — Gemini and every other cloud rung stay excluded
  * in that mode regardless of what triggered this capture.
  */
 export function buildGeminiOnlyVisionProviders(inputs: VisionProviderBuildInputs): VisionProviderConfig[] {
@@ -105,11 +114,19 @@ export function buildGeminiOnlyVisionProviders(inputs: VisionProviderBuildInputs
     providers.push(geminiFlashLite(credentials, inputs));
     providers.push(geminiFlash(credentials, inputs));
     providers.push(geminiPro(credentials, inputs));
-  } else {
-    providers.push(ollama(credentials, inputs));
-    providers.push(codex(credentials, inputs));
-    providers.push(custom(credentials, inputs));
+    providers.push(natively(credentials, inputs));
+    providers.push(openai(credentials, inputs));
+    providers.push(claude(credentials, inputs));
+    providers.push(groqScout(credentials, inputs));
+    providers.push(litellm(credentials, inputs));
+    providers.push(nvidiaNim(credentials, inputs));
   }
+
+  // Local providers — always allowed, including in private_vision, and kept
+  // as the tail of the cloud-first list too (same as buildVisionProviders).
+  providers.push(ollama(credentials, inputs));
+  providers.push(codex(credentials, inputs));
+  providers.push(custom(credentials, inputs));
 
   return providers.filter(p => p !== null) as VisionProviderConfig[];
 }

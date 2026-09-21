@@ -838,6 +838,8 @@ interface MessageRowProps {
   appearance: any;
   onCopy: (text: string) => void;
   renderMessageText: (msg: Message) => React.ReactNode;
+  /** Citation "open source document" viewer — click a Sources entry to load the full document. */
+  onOpenCitation: (sourceId: string) => void;
 }
 const formatProviderLabel = (provider?: string | null): string => {
   if (!provider) return 'not set';
@@ -973,6 +975,7 @@ const MessageRow = React.memo(
     appearance: _appearance,
     onCopy: _onCopy,
     renderMessageText,
+    onOpenCitation,
   }: MessageRowProps) {
     const t = useT();
     // Which attached screenshot (if any) is currently enlarged in this card.
@@ -1183,8 +1186,16 @@ const MessageRow = React.memo(
                       ? `${c.text.slice(0, CITATION_TEXT_MAX_CHARS)}…`
                       : c.text;
                     return (
-                      <div key={`${c.sourceId}-${i}`} className="rounded border border-current/10 px-1.5 py-1">
-                        <div className="font-medium truncate">{c.fileName}</div>
+                      <div
+                        key={`${c.sourceId}-${i}`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => onOpenCitation(c.sourceId)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenCitation(c.sourceId); } }}
+                        className="rounded border border-current/10 px-1.5 py-1 cursor-pointer hover:bg-current/5 hover:border-current/20 transition-colors"
+                        title={t('Open source document')}
+                      >
+                        <div className="font-medium truncate underline decoration-dotted underline-offset-2">{c.fileName}</div>
                         <div className="opacity-80 line-clamp-3 whitespace-pre-wrap">{displayText}</div>
                       </div>
                     );
@@ -1213,7 +1224,8 @@ const MessageRow = React.memo(
     prev.isLightTheme === next.isLightTheme &&
     prev.appearance === next.appearance &&
     prev.renderMessageText === next.renderMessageText &&
-    prev.onCopy === next.onCopy,
+    prev.onCopy === next.onCopy &&
+    prev.onOpenCitation === next.onOpenCitation,
 );
 
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
@@ -1689,6 +1701,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // renders — see the `liveScreenDescription ? ... : null` gate at its
   // render site).
   const [liveScreenDescription, setLiveScreenDescription] = useState('');
+  // Click-to-expand for the (deliberately small, never-growing) screen
+  // description block — no dedicated hide/collapse control on the block
+  // itself (Cmd+B still hides the whole overlay); this is the only way to
+  // read the full captured text if the 2-line clamp cut it off.
+  const [screenDescriptionExpanded, setScreenDescriptionExpanded] = useState(false);
+  // Citation "open source document" viewer — click a Sources entry to load
+  // the full document (not just its chunk snippet) via knowledge-doc:get.
+  const [openKnowledgeDoc, setOpenKnowledgeDoc] = useState<{ id: string; title: string; content: string; docType: string } | null>(null);
+  const [openKnowledgeDocLoading, setOpenKnowledgeDocLoading] = useState(false);
+  const [openKnowledgeDocError, setOpenKnowledgeDocError] = useState<string | null>(null);
+  const handleOpenCitation = useCallback(async (sourceId: string) => {
+    setOpenKnowledgeDocError(null);
+    setOpenKnowledgeDocLoading(true);
+    try {
+      const res = await window.electronAPI.knowledgeDocGet(sourceId);
+      if (res?.success && res.doc) {
+        setOpenKnowledgeDoc(res.doc);
+      } else {
+        setOpenKnowledgeDocError(t('This document could not be found — it may have been deleted.'));
+      }
+    } catch {
+      setOpenKnowledgeDocError(t('This document could not be found — it may have been deleted.'));
+    } finally {
+      setOpenKnowledgeDocLoading(false);
+    }
+  }, [t]);
   const userSpeakingRef = useRef(false);
   const rollingPartialDebounceUserRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRollingPartialUserRef = useRef<string | null>(null);
@@ -10034,14 +10072,40 @@ Provide only the answer, nothing else.`;
                   the first successful capture (liveScreenDescription is ''
                   when the flag is off, or before the first refresh lands). */}
               {liveScreenDescription ? (
-                <div className="mx-4 mt-3 mb-1 px-3.5 py-2 bg-blue-500/[0.06] border border-blue-500/15 rounded-[12px] no-drag">
-                  <div className="flex items-center gap-1.5 text-[10px] font-semibold text-blue-600/80 dark:text-blue-400/80 uppercase tracking-wide mb-1">
-                    <Eye className="w-3 h-3" />
-                    {t('Screen')}
+                // Restyled (2026-09-15) to match RollingTranscript's own
+                // surface instead of a one-off blue badge — same
+                // `overlay-transcript-surface` class (transparent by default,
+                // themed border-bottom in liquid-glass/modern) and the same
+                // label convention.
+                //
+                // DELIBERATELY SMALL AND NEVER EXPANDING (explicit direction,
+                // reverted from the earlier grow-to-fit treatment): unlike
+                // the transcript/answer, this block's actual VALUE is in
+                // feeding the answering model text context (already wired,
+                // see resolveLiveScreenContextForAnswer/buildScreenContextBlock)
+                // — a captured coding question can run to thousands of
+                // characters, and showing all of it permanently on screen
+                // would be constant visual noise for content the user rarely
+                // needs to read in full themselves. line-clamp-2 truncates
+                // with an ellipsis and never grows the shell, regardless of
+                // capture length.
+                <div className="w-[90%] mx-auto pt-2 no-drag">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setScreenDescriptionExpanded(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setScreenDescriptionExpanded(true); } }}
+                    className="overlay-transcript-surface transition-all duration-500 text-left cursor-pointer hover:bg-current/5 transition-colors"
+                    title={t('Click to view full captured text')}
+                  >
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--overlay-text-muted)] mb-0.5 flex items-center gap-1">
+                      <Eye className="w-2.5 h-2.5" />
+                      {t('Screen')}
+                    </div>
+                    <span className="text-[13px] leading-7 text-[var(--overlay-text-primary)] line-clamp-2 break-words">
+                      {liveScreenDescription}
+                    </span>
                   </div>
-                  <p className="text-[11.5px] text-black/70 dark:text-white/65 leading-snug line-clamp-2">
-                    {liveScreenDescription}
-                  </p>
                 </div>
               ) : null}
 
@@ -10085,7 +10149,14 @@ Provide only the answer, nothing else.`;
                   ref={scrollContainerRef}
                   className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 no-drag isolate"
                   layout={false}
-                  style={{ scrollbarWidth: 'none', maxHeight: scrollMaxH, minHeight: scrollMinH }}
+                  // scrollbarWidth was 'none' — the container is genuinely
+                  // scrollable (scrollMaxH is tied to real screen bounds, see
+                  // its own comment above; removing the cap risks pushing the
+                  // overlay off-screen on a long answer) but with an
+                  // invisible scrollbar there was no way to discover or use
+                  // that scroll when content hit the cap (2026-09-15 fix —
+                  // "thin" keeps it unobtrusive but actually visible/usable).
+                  style={{ scrollbarWidth: 'thin', maxHeight: scrollMaxH, minHeight: scrollMinH }}
                 >
                   {/* Every row spans the full inner width of the scroll
                                         container, which itself rides the shell's animated
@@ -10138,6 +10209,7 @@ Provide only the answer, nothing else.`;
                         appearance={appearance}
                         onCopy={handleCopy}
                         renderMessageText={renderMessageText}
+                        onOpenCitation={handleOpenCitation}
                       />
                     </div>
                   ) : isProcessing ? (
@@ -10302,6 +10374,87 @@ Provide only the answer, nothing else.`;
           </motion.div>
       {/* end always-mounted shell */}
     </div>
+    {/* Citation "open source document" viewer. Plain fixed overlay (no
+        existing modal component to reuse in this file) — click a Sources
+        entry to load the FULL document via knowledge-doc:get instead of
+        just the truncated chunk snippet shown inline. */}
+    {(openKnowledgeDoc || openKnowledgeDocLoading || openKnowledgeDocError) && (
+      <div
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 no-drag"
+        onClick={() => { setOpenKnowledgeDoc(null); setOpenKnowledgeDocError(null); }}
+      >
+        <div
+          className="max-w-[560px] max-h-[80vh] w-[90vw] flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-white dark:bg-neutral-900 shadow-xl overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-4 py-3 border-b border-black/10 dark:border-white/10">
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold truncate text-black/85 dark:text-white/85">
+                {openKnowledgeDoc?.title ?? t('Source document')}
+              </div>
+              {openKnowledgeDoc?.docType && (
+                <div className="text-[10px] uppercase tracking-wide opacity-50">{openKnowledgeDoc.docType}</div>
+              )}
+            </div>
+            <button
+              onClick={() => { setOpenKnowledgeDoc(null); setOpenKnowledgeDocError(null); }}
+              className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black/50 dark:text-white/50 shrink-0"
+              title={t('Close')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-3">
+            {openKnowledgeDocLoading && (
+              <div className="text-[12px] opacity-60">{t('Loading…')}</div>
+            )}
+            {openKnowledgeDocError && (
+              <div className="text-[12px] text-orange-600 dark:text-orange-400">{openKnowledgeDocError}</div>
+            )}
+            {openKnowledgeDoc && !openKnowledgeDocLoading && (
+              <div className="text-[12.5px] leading-relaxed whitespace-pre-wrap text-black/80 dark:text-white/75">
+                {openKnowledgeDoc.content}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
+    {/* Screen description "expand" viewer — the block itself has no hide/
+        collapse control (Cmd+B still hides the whole overlay); this is the
+        only way to read the full captured text past the 2-line clamp. Text
+        already lives in liveScreenDescription (no IPC fetch needed, unlike
+        the citation viewer above). */}
+    {screenDescriptionExpanded && (
+      <div
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 no-drag"
+        onClick={() => setScreenDescriptionExpanded(false)}
+      >
+        <div
+          className="max-w-[560px] max-h-[80vh] w-[90vw] flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-white dark:bg-neutral-900 shadow-xl overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-4 py-3 border-b border-black/10 dark:border-white/10">
+            <div className="flex items-center gap-1.5 text-[13px] font-semibold text-black/85 dark:text-white/85">
+              <Eye className="w-3.5 h-3.5" />
+              {t('Screen')}
+            </div>
+            <button
+              onClick={() => setScreenDescriptionExpanded(false)}
+              className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black/50 dark:text-white/50 shrink-0"
+              title={t('Close')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-3">
+            <div className="text-[12.5px] leading-relaxed whitespace-pre-wrap text-black/80 dark:text-white/75">
+              {liveScreenDescription}
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
     </>
   );
 };

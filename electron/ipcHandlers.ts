@@ -15392,6 +15392,20 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // For the citation "open source document" viewer — id is a citation's
+  // own sourceId (== this table's id column, see getById's doc comment).
+  safeHandle('knowledge-doc:get', async (_, id: string) => {
+    try {
+      if (typeof id !== 'string' || !id.trim()) return { success: false, error: 'invalid_id' };
+      const { InterviewKnowledgeRetriever } = require('./services/interviewKnowledge/InterviewKnowledgeRetriever');
+      const doc = InterviewKnowledgeRetriever.getInstance().getById(id);
+      return doc ? { success: true, doc } : { success: false, error: 'not_found' };
+    } catch (e: any) {
+      console.error('[IPC] knowledge-doc:get error:', e);
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
   // ── Interview Knowledge collections (companies/interviews) — same free-tier guarantee as knowledge-doc:* above ──
   safeHandle('knowledge-collection:create', async (_, params: { name: string; interviewerName?: string; contextNotes?: string }) => {
     try {
