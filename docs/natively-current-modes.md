@@ -1,4 +1,4 @@
-r# Natively modes as implemented, 2026-09-04
+# Natively modes as implemented, 2026-09-04
 
 Phase 1 deliverable. The campaign brief's mode table, corrected against the code on branch `feat/extension-system` at commit `330717e5`. Where the brief and the code disagree, the code is recorded and the disagreement is named.
 

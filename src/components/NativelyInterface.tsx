@@ -2400,9 +2400,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // `shellWidth` motion value (the panel's actual animating width) mins'd against
   // the measured vertical budget cap. Binding it to the live width means the
   // scroll area's tall/short budget grows/shrinks IN STEP with the panel as the
-  // spring runs (widthDerivedScrollMax: 320px collapsed → 560px expanded), so the
-  // visible chat region tracks the panel size frame-for-frame. This is a motion
-  // value bound to a style, so it updates without a React re-render.
+  // spring runs, so the visible answer region tracks the panel size
+  // frame-for-frame. This is a motion value bound to a style, so it updates
+  // without a React re-render.
+  // The width curve's ceiling (`maxHeight` below) is deliberately raised WAY
+  // past the old 560px aesthetic cap: the answer is the primary content the
+  // user is reading, and it was hitting an artificial ceiling — and scrolling
+  // — well before the actual screen ran out of room. `cap` (verticalCap, the
+  // real OS-window/screen budget from measureVerticalCap) is still the min()'d
+  // outer bound, so this never pushes content past what the display can
+  // actually grant; it just lets the answer use all of that real budget
+  // instead of stopping at an arbitrary smaller number. Internal scrolling
+  // (overflow-y-auto on the container below) remains as the fallback once
+  // `cap` itself is the binding constraint.
   // A user-pinned window height does NOT get its own branch here: it is folded
   // into `verticalCap` by measureVerticalCap, which already knows the measured
   // chrome height. That keeps one code path, reuses the tested
@@ -2418,6 +2428,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             widthDerivedScrollMax(w, {
               collapsedWidth: SHELL_WIDTH_COLLAPSED,
               expandedWidth: SHELL_WIDTH_EXPANDED,
+              // Real screen budget (`cap`) is the true ceiling — this is just
+              // raised far above it so it never becomes the binding term.
+              maxHeight: 4000,
             }),
             cap,
           ),

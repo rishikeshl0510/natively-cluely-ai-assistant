@@ -84,21 +84,20 @@ const RollingTranscript: React.FC<RollingTranscriptProps> = ({
                 <div className="w-[90%] mx-auto pt-2 space-y-1.5">
                     <div
                         ref={containerRef}
-                        // No fixed max-height (2026-09-15): removed the old
-                        // hardcoded max-h-[4.5em] clamp so the panel grows
-                        // with content instead of hiding most of it behind a
-                        // tiny fixed window. overflow-y-auto stays as a
-                        // SAFETY NET, not a clamp — it does nothing while
-                        // there is room to grow; it only engages if the real
-                        // ceiling (the main-process window-height clamp,
-                        // reportShellSize's workArea.height*0.9 budget) is
-                        // actually hit, so content becomes scrollable instead
-                        // of silently clipped by the shell's overflow-hidden
-                        // with no way to reach the rest (confirmed live —
-                        // removing overflow-y-auto entirely caused exactly
-                        // that). scrollbarWidth 'thin' keeps it visible/
-                        // discoverable, same fix as the answer area.
-                        className="overflow-y-auto overlay-transcript-surface transition-all duration-500 text-left"
+                        // Bounded height, scrolls internally (reinstated
+                        // 2026-09-21): the unbounded version below this
+                        // comment let a long question eat into the shared
+                        // "chrome" budget that measureVerticalCap subtracts
+                        // from the screen's height cap before handing the
+                        // remainder to the ANSWER area (see scrollMaxH in
+                        // NativelyInterface.tsx) — a long interviewer
+                        // question was quietly shrinking how much room the
+                        // answer got. The question box is secondary content;
+                        // it stays compact and scrolls on overflow so the
+                        // answer gets the room instead. scrollbarWidth
+                        // 'thin' keeps that internal scroll visible/
+                        // discoverable, same as the answer area.
+                        className="max-h-[4.5em] overflow-y-auto overlay-transcript-surface transition-all duration-500 text-left"
                         style={{ ...surfaceStyle, scrollbarWidth: 'thin' }}
                     >
                         {showTranscriptText && (
@@ -126,21 +125,12 @@ const RollingTranscript: React.FC<RollingTranscriptProps> = ({
                     {showUserLine && (
                         <div
                             ref={userContainerRef}
-                            // No fixed max-height (2026-09-15): removed the old
-                        // hardcoded max-h-[4.5em] clamp so the panel grows
-                        // with content instead of hiding most of it behind a
-                        // tiny fixed window. overflow-y-auto stays as a
-                        // SAFETY NET, not a clamp — it does nothing while
-                        // there is room to grow; it only engages if the real
-                        // ceiling (the main-process window-height clamp,
-                        // reportShellSize's workArea.height*0.9 budget) is
-                        // actually hit, so content becomes scrollable instead
-                        // of silently clipped by the shell's overflow-hidden
-                        // with no way to reach the rest (confirmed live —
-                        // removing overflow-y-auto entirely caused exactly
-                        // that). scrollbarWidth 'thin' keeps it visible/
-                        // discoverable, same fix as the answer area.
-                        className="overflow-y-auto overlay-transcript-surface transition-all duration-500 text-left"
+                            // Bounded height, scrolls internally — same
+                            // rationale as the interviewer box above: it's
+                            // secondary content and shouldn't eat the
+                            // "chrome" budget the answer area needs to
+                            // expand into (reinstated 2026-09-21).
+                        className="max-h-[4.5em] overflow-y-auto overlay-transcript-surface transition-all duration-500 text-left"
                         style={{ ...surfaceStyle, scrollbarWidth: 'thin' }}
                         >
                             <span className="text-[13px] leading-7 text-[var(--overlay-text-primary)] transition-all duration-300 whitespace-pre-wrap break-words">
