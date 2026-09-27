@@ -21,14 +21,24 @@
  *    while it is in flight — the next stoppage re-judges with more context;
  *  - the judge prompt's static prefix enables implicit provider caching.
  *
- * The user channel is INERT (user decision 2026-09-03). The user answers the
- * moment a question lands — nobody sits in silence waiting for the overlay —
- * so their own speech never cancels a streaming answer, never clears a
- * candidate and never drops a parked or deferred verdict. The mic is still
- * transcribed (the judge sees both sides), it just has no vote here. This
- * retired the 2026-08-24 "lenient mic" policy and its echo latch with it.
+ * The user (candidate) channel is MOSTLY INERT (user decision 2026-09-03).
+ * The user answers the moment a question lands — nobody sits in silence
+ * waiting for the overlay — so their own speech never cancels a streaming
+ * answer, never clears a candidate and never drops a parked or deferred
+ * verdict. The mic is still transcribed (the judge sees both sides).
+ * Retired the 2026-08-24 "lenient mic" policy and its echo latch with it.
  * Judge unavailable → almost-legacy fallback: dispatch only when the stopped
  * speech ends with '?'.
+ *
+ * ONE exception (2026-09-28): a candidate utterance that is itself
+ * uncertainty/confirmation-seeking phrasing directed at the interviewer —
+ * "so do you want me to do this?", "should I just go with X?" — still gets
+ * judged. Grammatically it's addressed to the interviewer, not a question for
+ * the assistant, but it signals the candidate is unsure and a suggested
+ * answer helps most exactly there. This is a SEPARATE, narrow path
+ * (CANDIDATE_UNCERTAINTY_RE + its own debounce) that never touches the
+ * interviewer `pending` array — ordinary candidate speech (the vast
+ * majority) remains fully inert, as above.
  */
 
 import type { TranscriptSegment } from '../../SessionTracker';
@@ -38,7 +48,7 @@ import { systemClock } from './AutoAnswerClock';
 import {
     JUDGE_DEADLINE_MS, JUDGE_CONTEXT_TURNS, parseJudgeVerdict, routeForVerdict, type JudgeRequest,
 } from './AutoAnswerJudge';
-import { isMidWordCut, joinTranscriptParts, normalizeForCompare } from './AutoAnswerText';
+import { isMidWordCut, joinTranscriptParts, looksIncomplete, normalizeForCompare } from './AutoAnswerText';
 import type { AutoAnswerThresholds } from './AutoAnswerPolicy';
 import { DEFAULT_THRESHOLDS } from './AutoAnswerPolicy';
 import type { AutoAnswerQuestion, AutoAnswerTelemetryEvent } from './AutoAnswerTypes';
@@ -194,6 +204,52 @@ export const CIRCUIT_BREAKER_WINDOW_MS = 10_000;
 export const CIRCUIT_BREAKER_MAX_DISPATCHES = 5;
 /** How long the breaker stays open once tripped — long enough that a transient bug's storm has certainly ended, short enough that a real false trip self-heals inside one meeting. */
 export const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
+/**
+ * Extra quiet time granted, ONCE per candidate key, when the commit stoppage
+ * finds the text still trailing off (see `looksIncomplete`). Extends past
+ * STABILITY_MS rather than committing and answering the first half of a
+ * still-forming question, then delivering a second, different answer for the
+ * continuation once it arrives — which is indistinguishable, from the user's
+ * seat, from "the answer randomly changed." Applied at most once per key so a
+ * candidate that genuinely trails off forever (rare) still resolves rather
+ * than waiting indefinitely.
+ */
+export const INCOMPLETE_EXTRA_WAIT_MS = 1500;
+/**
+ * A candidate (user-channel) utterance that is itself uncertainty or
+ * confirmation-seeking phrasing directed at the interviewer. See the file
+ * header's 2026-09-28 note. Deliberately conservative — this is the ONE hole
+ * in an otherwise-inert channel, so a false positive fires the judge (cheap)
+ * on ordinary candidate speech, but a false negative just means the existing
+ * (correct) inert behavior continues.
+ */
+export const CANDIDATE_UNCERTAINTY_RE =
+    /\b(?:do you want me to|would you (?:like|want) me to|should i\b|shall i\b|is that (?:right|correct|okay|ok|fine|alright)\??|is this (?:right|correct|okay|ok|fine|alright)\??|am i (?:supposed|meant|allowed) to|does that (?:make sense|sound (?:right|ok|good)|work for you)\??|do you (?:need|want) me to|so should i\b)\b/i;
+/** Debounce for the candidate-uncertainty path, mirroring STABILITY_MS. */
+export const CANDIDATE_STABILITY_MS = 1200;
+/**
+ * INVESTIGATED AND REJECTED (2026-09-28): keeping `pending` populated after
+ * dispatch, so a fast follow-up final stitches onto the just-answered
+ * question instead of being judged in isolation. The concern was that a bare
+ * elaboration clause ("...specifically when there's no lock available")
+ * doesn't read as a question alone and could be silently dropped by the
+ * judge.
+ *
+ * Measured before shipping: (1) the judge and the downstream WhatToAnswerLLM
+ * pipeline both already receive `recentTurns`/session history independent of
+ * `pending` — a live test confirmed an isolated bare fragment gets correctly
+ * resolved into a coherent, connected answer without any stitching, via
+ * conversation-state.ts's follow-up resolution. (2) A real regression: any
+ * new, UNRELATED utterance arriving inside the stitch window got glued onto
+ * the stale dispatched text too, corrupting the candidate the judge actually
+ * evaluates (broke 'judge yes -> dispatch ... verdicts stand without
+ * re-judging' — a wordle question got wrongly re-triggered by an unrelated
+ * "New York Times website" remark 3s later, because the stitched text still
+ * contained the word "wordle"). A time window alone cannot distinguish
+ * "elaborating on X" from "moved on to Y" — only content can, and the
+ * content-level resolver already does that correctly downstream. Left as a
+ * comment, not a re-implementation, so this isn't re-attempted the same way.
+ */
 
 export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
@@ -299,6 +355,11 @@ export class SimpleAutoAnswerEngine {
     /** What last bumped judgeSeq, so a discarded verdict can say what killed it. */
     private judgeSeqCause: NonNullable<AutoAnswerTelemetryEvent['supersededBy']> | null = null;
     private thresholds: AutoAnswerThresholds;
+    /** Candidate key already granted its one INCOMPLETE_EXTRA_WAIT_MS extension — see the constant's note. */
+    private incompleteExtendedKey: string | null = null;
+    /** The candidate-uncertainty path's own pending utterance and debounce timer — deliberately separate from `pending`/`timer` so it can never merge with or disrupt interviewer-side state. */
+    private candidateCandidate: { text: string; at: number } | null = null;
+    private candidateTimer: ClockTimer | null = null;
 
     constructor(
         private readonly host: SimpleAutoAnswerHost,
@@ -379,11 +440,56 @@ export class SimpleAutoAnswerEngine {
             return;
         }
 
-        // ── user channel: INERT (user decision 2026-09-03) ────────────────
+        // ── user (candidate) channel: MOSTLY INERT (user decision 2026-09-03) ──
         // The user starts answering as soon as the question lands. Their
         // speech must not cancel the stream, clear the candidate, or drop a
         // parked / deferred verdict — the answer is wanted precisely while
-        // they are talking. Nothing to do on this channel.
+        // they are talking. This branch does none of that: it only watches
+        // for a FINAL candidate utterance that is itself uncertainty/
+        // confirmation-seeking phrasing (see CANDIDATE_UNCERTAINTY_RE and the
+        // 2026-09-28 file-header note), on its own debounce, never touching
+        // `pending`/`timer`.
+        if (!segment.final || !text) return;
+        if (!CANDIDATE_UNCERTAINTY_RE.test(text)) return;
+        this.candidateCandidate = { text, at: now };
+        if (this.candidateTimer) this.clock.clearTimeout(this.candidateTimer);
+        this.candidateTimer = this.clock.setTimeout(() => {
+            this.candidateTimer = null;
+            this.onCandidateStoppage();
+        }, CANDIDATE_STABILITY_MS);
+    }
+
+    /**
+     * Commit point for the candidate-uncertainty path. Deliberately yields to
+     * an interviewer question still forming (`pending.length > 0`) — the
+     * interviewer's own turn always takes precedence, and consult()'s `parts`
+     * is sourced from `pending`, so firing here while it's non-empty would mix
+     * the two speakers' text into one judge call.
+     */
+    private onCandidateStoppage(): void {
+        if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
+        const c = this.candidateCandidate;
+        this.candidateCandidate = null;
+        if (!c || this.pending.length > 0) return;
+        const candidate = c.text.trim();
+        if (!candidate) return;
+        const key = normalizeForCompare(candidate);
+        if (key === this.lastJudgedKey) return;
+        if (this.lastAnsweredText && normalizeForCompare(this.lastAnsweredText) === key) return;
+
+        const now = this.clock.now();
+        const id = `${this.host.meetingGeneration()}-c${++this.sequence}`;
+        this.emit({
+            name: 'auto_answer_candidate', questionId: id,
+            candidateWordCount: candidate.split(/\s+/).filter(Boolean).length,
+            endpointSource: 'quiet_window',
+        });
+        this.lastJudgedKey = key;
+        this.host.logContent?.(`judging (candidate-directed) ${id}`, candidate);
+        _atrace(`${id} candidate-uncertainty fired — sending to judge`);
+        this.host.noteCandidate?.(id, this.sequence);
+        this.maybePrefetch(id, candidate, now);
+        void this.consult(id, candidate, now, false);
     }
 
     // ── the stoppage ──────────────────────────────────────────────────────
@@ -446,6 +552,18 @@ export class SimpleAutoAnswerEngine {
         }
         if (this.lastAnsweredText && normalizeForCompare(this.lastAnsweredText) === key) {
             this.emit({ name: 'auto_answer_ignored', skipReason: 'duplicate' });
+            return;
+        }
+        // Commit-only: a candidate that still trails off mid-sentence gets ONE
+        // extra window rather than being judged and answered as-is — see
+        // INCOMPLETE_EXTRA_WAIT_MS. `early` never commits, so it's exempt (an
+        // early ask on partial text is harmless speculation). Keyed so a
+        // candidate that genuinely never finishes still resolves eventually
+        // instead of waiting forever.
+        if (!early && key !== this.incompleteExtendedKey && looksIncomplete(candidate)) {
+            this.incompleteExtendedKey = key;
+            this.emit({ name: 'auto_answer_ignored', skipReason: 'incomplete', candidateWordCount: words });
+            this.arm(INCOMPLETE_EXTRA_WAIT_MS);
             return;
         }
 
@@ -789,6 +907,9 @@ export class SimpleAutoAnswerEngine {
         this.lastAnsweredText = null;
         this.lastPrefetchAt = null;
         this.held = null;
+        this.incompleteExtendedKey = null;
+        if (this.candidateTimer) { this.clock.clearTimeout(this.candidateTimer); this.candidateTimer = null; }
+        this.candidateCandidate = null;
         this.bumpJudgeSeq('meeting_reset');
         this.sequence = 0;
     }

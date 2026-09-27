@@ -17021,10 +17021,36 @@ export function initializeIpcHandlers(appState: AppState): void {
 
     safeHandle('__e2e__:ask', async (
       _,
-      params: { question: string; context?: string; timeoutMs?: number; injectAsTranscript?: boolean; priorTurns?: Array<{ speaker: string; text: string }>; hotkey?: boolean; imagePaths?: string[]; noReset?: boolean },
+      params: { question: string; context?: string; timeoutMs?: number; injectAsTranscript?: boolean; priorTurns?: Array<{ speaker: string; text: string }>; hotkey?: boolean; imagePaths?: string[]; noReset?: boolean; autoMatchSkill?: boolean; skillId?: string },
     ) => {
       const im = appState.getIntelligenceManager();
       const timeoutMs = params.timeoutMs ?? 60_000;
+      // Skill resolution (2026-09-28, test-only): mirrors main.ts's real
+      // auto-answer dispatch path — matchSkillForMessage against enabled
+      // skills (when autoMatchSkill), or an explicit skillId override for a
+      // pinned test — then the same SkillsManager.buildPromptBlock() the
+      // production path uses. Lets the harness verify skill selection AND
+      // its effect on the real answer in one call, instead of only the
+      // answer-generation half __e2e__:ask covered before.
+      let e2eActiveSkill: { id: string; name: string; promptBlock: string } | undefined;
+      try {
+        const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
+        const skillsManager = SkillsManager.getInstance();
+        let resolvedSkill: ReturnType<typeof skillsManager.getSkill> = null;
+        if (params.skillId) {
+          resolvedSkill = skillsManager.getSkill(params.skillId);
+        } else if (params.autoMatchSkill) {
+          const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+          const enabledSkills = skillsManager.listSkills().filter((s) => s.enabled !== false);
+          const match = matchSkillForMessage(params.question, enabledSkills);
+          if (match) resolvedSkill = skillsManager.getSkill(match.skillId);
+        }
+        if (resolvedSkill) {
+          e2eActiveSkill = { id: resolvedSkill.id, name: resolvedSkill.name, promptBlock: skillsManager.buildPromptBlock(resolvedSkill) };
+        }
+      } catch (e: any) {
+        console.warn('[E2E] skill resolution failed (non-fatal, answering without a skill):', e?.message || e);
+      }
       // Per-question isolation: clear engine + session state before each independent
       // ask so a prior question's speculative-answer cache / accumulated transcript
       // can't leak into this one (handleSuggestionTrigger reuses speculativeText by
@@ -17059,7 +17085,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           if (settled) return;
           settled = true;
           cleanup();
-          if (latest) resolve({ success: true, answer: latest.answer, question: latest.question, confidence: latest.confidence, streamedTokens: tokens });
+          if (latest) resolve({ success: true, answer: latest.answer, question: latest.question, confidence: latest.confidence, streamedTokens: tokens, matchedSkillId: e2eActiveSkill?.id ?? null, matchedSkillName: e2eActiveSkill?.name ?? null });
           else resolve({ success: false, timedOut: true, streamedTokens: tokens });
         };
         const onToken = (token: string) => { tokens += token; };
@@ -17120,12 +17146,13 @@ export function initializeIpcHandlers(appState: AppState): void {
         // the planner-routed auto-answer path.
         Promise.resolve(
           params.hotkey
-            ? im.runWhatShouldISay(params.question, 0.9, params.imagePaths, { skipCooldown: true, forceFresh: true })
+            ? im.runWhatShouldISay(params.question, 0.9, params.imagePaths, { skipCooldown: true, forceFresh: true, activeSkill: e2eActiveSkill })
             : im.handleSuggestionTrigger({
               context: builtContext,
               lastQuestion: params.question,
               confidence: 0.9,
-            }),
+              activeSkill: e2eActiveSkill,
+            } as any),
         ).then(() => {
           // The trigger has fully decided. Give streamed tokens a brief window to
           // flush into a suggested_answer; if none arrives, settle on whatever we

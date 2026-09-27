@@ -4,8 +4,11 @@
 // explicitly types "/skill-name" or "$skill-name" (ipcHandlers.ts's
 // skillPrefixMatch block). This module lets an ENABLED skill fire on its own
 // when the message text matches a trigger phrase the skill author explicitly
-// quoted in its description — no LLM call, no fuzzy scoring, so a skill
-// cannot silently misfire on unrelated content.
+// quoted in its description — no LLM call, so a skill cannot silently
+// misfire on unrelated content, and no network round trip, so this stays
+// synchronous and zero-latency on the live auto-answer hot path (this runs
+// inline before dispatch on every turn — see SkillsManager's hot-path
+// comment on its own cache).
 //
 // DELIBERATE DESIGN: match ONLY on double-quoted phrases in `description`,
 // not on the whole description's prose. A description is written to EXPLAIN
@@ -19,6 +22,16 @@
 // auto-fires — it falls back to manual /skill-name invocation exactly as
 // today, so this is 100% backward compatible with every existing skill that
 // wasn't written with auto-matching in mind.
+//
+// SEMANTIC UPGRADE (2026-09-28): an exact literal substring was too brittle —
+// "review this code" would not fire for "can you review my code real quick"
+// or "could you check this code over", both plainly the same trigger spoken
+// differently. A live question is transcribed speech, not typed text: it
+// carries fillers, reordering, and STT artifacts a literal match cannot
+// absorb. This adds a FUZZY tier (word-overlap containment, order-independent,
+// tolerant of one missing content word) below the exact tier, scored lower so
+// an exact quoted-phrase hit always outranks a fuzzy one. Deliberately NOT an
+// embedding/LLM call — see the latency note above.
 
 export interface AutoMatchableSkill {
     id: string;
@@ -36,35 +49,89 @@ export interface SkillMatchResult {
     matchedPhrase: string;
 }
 
+const STOP_WORDS = new Set([
+    'the', 'a', 'an', 'to', 'of', 'and', 'or', 'is', 'are', 'my', 'your', 'this', 'that',
+    'me', 'you', 'i', 'please', 'can', 'could', 'would', 'just', 'quick', 'real', 'kindly',
+]);
+
+function contentWords(phrase: string): string[] {
+    return phrase
+        .split(/[^a-z0-9']+/i)
+        .map((w) => w.toLowerCase())
+        .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+}
+
+/**
+ * Fuzzy containment: what fraction of the phrase's CONTENT words (stop words
+ * excluded on both sides) appear anywhere in the message, order-independent.
+ *
+ * Requires at least TWO content words. A phrase that reduces to one content
+ * word ("can you help" -> just "help") has no reordering/paraphrase to
+ * absorb in the first place — fuzzy matching it would fire on any message
+ * containing that one common word anywhere, which is exactly the false-
+ * positive risk the exact-substring tier was designed to avoid. A one-word
+ * trigger is already served correctly by the exact tier.
+ */
+function fuzzyContainment(phrase: string, messageWords: Set<string>): number {
+    const words = contentWords(phrase);
+    if (words.length < 2) return 0;
+    let hit = 0;
+    for (const w of words) if (messageWords.has(w)) hit++;
+    return hit / words.length;
+}
+
+/** A fuzzy hit needs most of the phrase's content words present — tolerant of one missing word on longer phrases, but never a majority-absent match. */
+const FUZZY_THRESHOLD = 0.75;
+
 /**
  * Returns the best-matching enabled skill for this message, or null.
- * "Best" = the skill with the most distinct matched phrases; ties broken by
- * the longest single matched phrase (a longer quoted phrase is a more
- * specific, more deliberate trigger than a short one, so it wins a tie).
+ *
+ * Two tiers, exact always outranking fuzzy:
+ *   - EXACT: the phrase appears as a literal substring (unchanged behavior).
+ *   - FUZZY: the phrase's content words are mostly present, in any order —
+ *     catches paraphrased/reordered speech an exact substring misses.
+ *
+ * Within a tier, "best" = the skill with the most distinct matched phrases;
+ * ties broken by the longest single matched phrase (a longer quoted phrase is
+ * a more specific, more deliberate trigger than a short one).
  */
 export function matchSkillForMessage(message: string, skills: AutoMatchableSkill[]): SkillMatchResult | null {
     const lower = String(message || '').toLowerCase();
     if (!lower.trim()) return null;
+    const messageWords = new Set(lower.split(/[^a-z0-9']+/i).filter(Boolean));
 
-    let best: { skillId: string; hitCount: number; longestPhrase: string } | null = null;
+    let bestExact: { skillId: string; hitCount: number; longestPhrase: string } | null = null;
+    let bestFuzzy: { skillId: string; hitCount: number; longestPhrase: string } | null = null;
+
     for (const skill of skills) {
         const phrases = extractTriggerPhrases(skill.description);
-        let hitCount = 0;
-        let longestPhrase = '';
+        let exactHits = 0, exactLongest = '';
+        let fuzzyHits = 0, fuzzyLongest = '';
         for (const phrase of phrases) {
             if (lower.includes(phrase)) {
-                hitCount++;
-                if (phrase.length > longestPhrase.length) longestPhrase = phrase;
+                exactHits++;
+                if (phrase.length > exactLongest.length) exactLongest = phrase;
+                continue; // an exact hit is also trivially a fuzzy hit — count it once, at the stronger tier
+            }
+            if (fuzzyContainment(phrase, messageWords) >= FUZZY_THRESHOLD) {
+                fuzzyHits++;
+                if (phrase.length > fuzzyLongest.length) fuzzyLongest = phrase;
             }
         }
-        if (hitCount === 0) continue;
-        if (
-            !best ||
-            hitCount > best.hitCount ||
-            (hitCount === best.hitCount && longestPhrase.length > best.longestPhrase.length)
-        ) {
-            best = { skillId: skill.id, hitCount, longestPhrase };
+        if (exactHits > 0 && (
+            !bestExact || exactHits > bestExact.hitCount ||
+            (exactHits === bestExact.hitCount && exactLongest.length > bestExact.longestPhrase.length)
+        )) {
+            bestExact = { skillId: skill.id, hitCount: exactHits, longestPhrase: exactLongest };
+        }
+        if (fuzzyHits > 0 && (
+            !bestFuzzy || fuzzyHits > bestFuzzy.hitCount ||
+            (fuzzyHits === bestFuzzy.hitCount && fuzzyLongest.length > bestFuzzy.longestPhrase.length)
+        )) {
+            bestFuzzy = { skillId: skill.id, hitCount: fuzzyHits, longestPhrase: fuzzyLongest };
         }
     }
-    return best ? { skillId: best.skillId, matchedPhrase: best.longestPhrase } : null;
+
+    const winner = bestExact ?? bestFuzzy;
+    return winner ? { skillId: winner.skillId, matchedPhrase: winner.longestPhrase } : null;
 }

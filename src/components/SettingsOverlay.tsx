@@ -20,6 +20,7 @@ import { PhoneMirrorSettings } from './settings/PhoneMirrorSettings';
 import { EmbeddingSettings } from './settings/EmbeddingSettings';
 import { RerankerSettings } from './settings/RerankerSettings';
 import { IntelligenceSettings } from './settings/IntelligenceSettings';
+import { ScreenVisionSettings } from './settings/ScreenVisionSettings';
 import { KnowledgeDocsPanel } from './settings/KnowledgeDocsPanel';
 import { SkillsSettings } from './settings/SkillsSettings';
 import { LocalWhisperModelPanel, type ChannelConfig as LocalWhisperChannelConfig } from './LocalWhisperModelPanel';
@@ -420,6 +421,7 @@ const SETTINGS_NAV_ORDER = [
     'keybinds',
     'phone-mirror',
     'intelligence',
+    'screen-vision',
     'knowledge',
     'help',
     'about',
@@ -1951,6 +1953,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     >
                                         {activeTab === 'intelligence' && navActivePill}
                                         <Cpu size={16} /> {t('Intelligence')}
+                                    </button>
+
+                                    <button
+                                        onClick={() => setActiveTab('screen-vision')}
+                                        className={navItemClass(activeTab === 'screen-vision')}
+                                    >
+                                        {activeTab === 'screen-vision' && navActivePill}
+                                        <Eye size={16} /> {t('Screen & Vision')}
                                     </button>
 
                                     <button
@@ -3919,6 +3929,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
                             {activeTab === 'intelligence' && (
                                 <IntelligenceSettings />
+                            )}
+
+                            {activeTab === 'screen-vision' && (
+                                <ScreenVisionSettings />
                             )}
 
                             {activeTab === 'knowledge' && (

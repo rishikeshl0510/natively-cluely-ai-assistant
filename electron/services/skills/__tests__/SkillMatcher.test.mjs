@@ -75,4 +75,45 @@ describe('matchSkillForMessage', () => {
     assert.equal(matchSkillForMessage('', skills), null);
     assert.equal(matchSkillForMessage('   ', skills), null);
   });
+
+  test('FUZZY (2026-09-28): a paraphrased/reordered spoken version of a multi-word trigger still matches', async () => {
+    const { matchSkillForMessage } = await loadModule();
+    const skills = [
+      { id: 'code-review', description: 'Use when the user asks to "review this code".' },
+    ];
+    // Real live speech: filler words, reordering, no exact substring.
+    const result = matchSkillForMessage('could you review my code real quick before I ship it', skills);
+    assert.equal(result?.skillId, 'code-review');
+    assert.equal(result?.matchedPhrase, 'review this code');
+  });
+
+  test('FUZZY: an exact hit always outranks a fuzzy hit on a different skill', async () => {
+    const { matchSkillForMessage } = await loadModule();
+    const skills = [
+      { id: 'exact-skill', description: 'Trigger on "check my pull request".' },
+      { id: 'fuzzy-skill', description: 'Trigger on "check my pull request status".' },
+    ];
+    // Literal substring for exact-skill; fuzzy-skill's phrase is missing "status" so it's a fuzzy-only hit too.
+    const result = matchSkillForMessage('please check my pull request', skills);
+    assert.equal(result?.skillId, 'exact-skill');
+  });
+
+  test('FUZZY: a short phrase made entirely of stop words never fuzzy-matches (nothing distinctive to anchor on)', async () => {
+    const { matchSkillForMessage } = await loadModule();
+    const skills = [
+      { id: 'vague-skill', description: 'Trigger on "can you help".' },
+    ];
+    const result = matchSkillForMessage('I was wondering if this update could help my team out today', skills);
+    assert.equal(result, null);
+  });
+
+  test('FUZZY: below-threshold word overlap does not match', async () => {
+    const { matchSkillForMessage } = await loadModule();
+    const skills = [
+      { id: 'design-skill', description: 'Trigger on "walk me through the system design".' },
+    ];
+    // Only "system" overlaps out of the content words (walk, system, design) — well under threshold.
+    const result = matchSkillForMessage('what is a good system for watering plants', skills);
+    assert.equal(result, null);
+  });
 });

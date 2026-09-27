@@ -2450,86 +2450,13 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     // --- Dynamic Model Discovery ---
     const [preferredModels, setPreferredModels] = useState<Record<string, string>>({});
 
-    // --- Screen Understanding (vision routing) ---
-    const [screenUnderstandingMode, setScreenUnderstandingMode] = useState<'vision_first' | 'vision_only' | 'private_vision'>('vision_first');
-    const [technicalInterviewVisionFirst, setTechnicalInterviewVisionFirst] = useState<boolean>(true);
-
     // --- Cloud Provider Data Scopes (fail-closed cloud share controls) ---
     const [providerDataScopes, setProviderDataScopes] = useState<{ transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean }>({});
 
-    // `screenUnderstandingMode` is one enum with three values, but it answers two
-    // independent user questions. Presenting it as three radios forced the user to
-    // read our provider-fallback architecture; presenting it as two switches asks
-    // what they actually care about.
-    //
-    //   local-only OFF + require OFF  -> 'vision_first'   (cascade, most permissive)
-    //   local-only OFF + require ON   -> 'vision_only'    (never silently drop)
-    //   local-only ON                 -> 'private_vision' (local vision only)
-    //
-    // 'private_vision' already requires a local vision provider, so the require
-    // switch is implied — and disabled — while local-only is on. Both switches stay
-    // in ONE card on purpose: they write the same enum, so splitting them across
-    // tabs would let one clobber the other's choice.
-    const visionLocalOnly = screenUnderstandingMode === 'private_vision';
-    const visionRequired = screenUnderstandingMode === 'vision_only' || visionLocalOnly;
-
-    // Three enum values, two switches — so 'private_vision' cannot represent what
-    // the "Require" switch was set to before local-only was turned on. Deriving it
-    // (`visionRequired` above is true whenever local-only is) meant turning
-    // local-only back OFF resolved `required` as true and landed on 'vision_only',
-    // never 'vision_first'. A switch the user never touched silently latched ON and
-    // there was no UI path back to the default. Remembering the pre-local-only
-    // value restores the round-trip WITHIN A MOUNT — this is a ref, not persisted
-    // state, so closing Settings between the two toggles loses it and leaving
-    // local-only lands on 'vision_first'. That is the safe direction (the old bug
-    // latched "Require" ON with no way back); persisting it would need a second
-    // stored field, which the enum deliberately does not have.
-    const requiredBeforeLocalOnly = useRef<boolean | null>(null);
-
-    const applyVisionMode = async (localOnly: boolean, required: boolean) => {
-        // Snapshot what a refused write has to be rolled back TO. Both of these
-        // are mutated below, so capture before, not after.
-        const previousMode = screenUnderstandingMode;
-        const previousRequiredBefore = requiredBeforeLocalOnly.current;
-
-        let effectiveRequired = required;
-        if (localOnly && !visionLocalOnly) {
-            // Entering local-only: stash what "Require" really was, since the
-            // enum is about to stop being able to express it.
-            requiredBeforeLocalOnly.current = screenUnderstandingMode === 'vision_only';
-        } else if (!localOnly && visionLocalOnly) {
-            // Leaving local-only: restore it rather than reading it back off the
-            // derived value, which is unconditionally true while local-only is on.
-            effectiveRequired = requiredBeforeLocalOnly.current ?? false;
-            requiredBeforeLocalOnly.current = null;
-        }
-        const mode = localOnly ? 'private_vision' : (effectiveRequired ? 'vision_only' : 'vision_first');
-        setScreenUnderstandingMode(mode);
-
-        // CR-04 follow-up: the handler refuses when the settings store is degraded
-        // and — correctly — no longer broadcasts, so the
-        // onScreenUnderstandingModeChanged subscription that normally re-converges
-        // this component never fires. Setting local state optimistically and
-        // ignoring the result therefore left THIS window showing a privacy mode
-        // that was never saved, while main and disk held the old one. On a setting
-        // whose copy promises "cloud vision is never called", a mode the UI only
-        // THINKS it is in is not cosmetic. Roll back on refusal.
-        try {
-            const res = await window.electronAPI?.setScreenUnderstandingMode?.(mode);
-            if (res && res.success === false) {
-                setScreenUnderstandingMode(previousMode);
-                requiredBeforeLocalOnly.current = previousRequiredBefore;
-                console.warn('[AIProviders] screen-understanding mode was not saved:', res.error);
-            }
-        } catch (e) {
-            // Now that this is awaited, a rejected IPC would surface as an
-            // unhandled rejection from an onChange handler. A failed write must
-            // roll the switch back for the same reason a refused one does.
-            setScreenUnderstandingMode(previousMode);
-            requiredBeforeLocalOnly.current = previousRequiredBefore;
-            console.warn('[AIProviders] screen-understanding mode write failed:', e);
-        }
-    };
+    // Screen Understanding (vision routing) MOVED to ScreenVisionSettings.tsx
+    // (2026-09-28, own top-level Settings tab — was buried in this Privacy
+    // sub-tab). `providerDataScopes` stays here: the Data Scopes card below
+    // still needs it, and ScreenVisionSettings fetches its own read-only copy.
 
     // Where a disabled scope's data actually goes. Must match ENFORCEMENT
     // (LLMHelper.scopeFallbackAvailable), not `ollamaModels.length > 0` — which
@@ -2546,9 +2473,6 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         (key === 'screenshots' || providerDataScopes.screenshots === false)
             ? localFallback.vision
             : localFallback.text;
-    // Card-level shorthand: the Screenshots card is about images, so it asks the
-    // vision question.
-    const localFallbackAvailable = localFallback.vision;
     const disabledScopeCount = SCOPE_ROWS.filter(r => providerDataScopes[r.key] === false).length;
 
     // Load Initial Data
@@ -3142,34 +3066,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         return () => { for (const u of unsubs) try { u(); } catch { /* noop */ } };
     }, []);
 
-    // Load Screen Understanding (vision routing) settings
-    useEffect(() => {
-        window.electronAPI?.getScreenUnderstandingMode?.().then(setScreenUnderstandingMode as any).catch(() => { });
-        (window.electronAPI as any)?.getTechnicalInterviewVisionFirst?.()
-            .then(setTechnicalInterviewVisionFirst)
-            .catch(() => {
-                // Fallback to deprecated alias if the renderer is talking to an older main process.
-                window.electronAPI?.getTechnicalInterviewDirectVision?.().then(setTechnicalInterviewVisionFirst).catch(() => { });
-            });
-    }, []);
-
-    useEffect(() => {
-        const api: any = window.electronAPI;
-        if (!api?.onScreenUnderstandingModeChanged) return;
-        const unsubscribe = api.onScreenUnderstandingModeChanged(setScreenUnderstandingMode);
-        return () => unsubscribe?.();
-    }, []);
-
-    useEffect(() => {
-        const api: any = window.electronAPI;
-        const handler = (enabled: boolean) => setTechnicalInterviewVisionFirst(enabled);
-        const unsub1 = api?.onTechnicalInterviewVisionFirstChanged?.(handler);
-        const unsub2 = api?.onTechnicalInterviewDirectVisionChanged?.(handler);
-        return () => {
-            unsub1?.();
-            unsub2?.();
-        };
-    }, []);
+    // Screen Understanding load/subscribe effects MOVED to ScreenVisionSettings.tsx.
 
     // Load Cloud Provider Data Scopes and subscribe to cross-window changes
     useEffect(() => {
@@ -4903,110 +4800,8 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                 className="space-y-5 aip-panel-fade"
                 data-stagger-skip
             >
-            {/* Screenshots — the privacy-relevant half of screenUnderstandingMode.
-                Was three radios (Vision first / Vision only / Private vision) whose
-                copy could only describe itself as "Recommended" vs "Stricter" — a
-                fallback-strategy distinction the user has no way to reason about.
-                Now two switches over the same enum; see applyVisionMode(). */}
-            <div className="space-y-5">
-                <div>
-                    <h3 className="text-sm font-bold aip-hero mb-1">{t('Screenshots')}</h3>
-                    <p className="text-xs aip-muted mb-2">{t('Controls where screenshots of your screen are processed.')}</p>
-                </div>
-                <div className="aip-card p-5 flex flex-col gap-3">
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="flex flex-col min-w-0">
-                            <span className="text-xs aip-hero font-semibold">{t('Keep screenshots on this device')}</span>
-                            <span className="aip-meta leading-snug mt-0.5">
-                                {t('Use a local vision model (Ollama) only. Cloud vision is never called.')}
-                            </span>
-                        </div>
-                        <AipSwitch
-                            checked={visionLocalOnly}
-                            label={t('Keep screenshots on this device')}
-                            onChange={(next) => applyVisionMode(next, visionRequired)}
-                        />
-                    </div>
-
-                    {visionLocalOnly && !localFallbackAvailable && (
-                        <div className="aip-inline-warn flex items-start gap-2">
-                            <AlertCircle size={12} strokeWidth={1.75} className="shrink-0 mt-0.5" aria-hidden="true" />
-                            <span>{t('No local vision model is installed. Screenshot questions will be refused rather than sent to the cloud. Install a vision-capable model under Local & Gateways.')}</span>
-                        </div>
-                    )}
-
-                    <div className="flex items-center justify-between gap-3 pt-3 border-t" style={{ borderColor: 'var(--aip-divider)' }}>
-                        <div className="flex flex-col min-w-0">
-                            <span className={`text-xs font-semibold ${visionLocalOnly ? 'aip-faint' : 'aip-hero'}`}>
-                                {t('Require a vision-capable provider')}
-                            </span>
-                            <span className="aip-meta leading-snug mt-0.5">
-                                {visionLocalOnly
-                                    ? t('Always on while screenshots stay on this device.')
-                                    : t('Fail with a clear error instead of quietly answering without the screenshot.')}
-                            </span>
-                        </div>
-                        <AipSwitch
-                            checked={visionRequired}
-                            disabled={visionLocalOnly}
-                            label={t('Require a vision-capable provider')}
-                            onChange={(next) => applyVisionMode(visionLocalOnly, next)}
-                        />
-                    </div>
-
-
-                    {/* Capture quality, not privacy — but it is about screenshots, and
-                        this is the screenshots card, so it groups by subject rather than
-                        by which engine owns it. */}
-                    <div className="flex items-center justify-between gap-3 pt-3 border-t" style={{ borderColor: 'var(--aip-divider)' }}>
-                        <div className="flex flex-col min-w-0">
-                            <span className="text-xs aip-hero font-semibold">{t('High-resolution capture for code')}</span>
-                            {/* Scope qualifier restored. This writes
-                                `technicalInterviewVisionFirst`, whose only consumer is
-                                ScreenUnderstandingService.pickOptimizationProfile, and only
-                                when the active mode is a technical template. Copy that
-                                promised it for screenshots generally described a setting
-                                that does nothing on the hotkey/attachment capture path. */}
-                            <span className="aip-meta leading-snug mt-0.5">{t('In technical interview and coding modes, captures at the highest-resolution profile so small code text stays legible. Costs more tokens per screenshot.')}</span>
-                        </div>
-                        <AipSwitch
-                            checked={technicalInterviewVisionFirst}
-                            label={t('High-resolution capture for code')}
-                            onChange={(next) => {
-                                setTechnicalInterviewVisionFirst(next);
-                                const api: any = window.electronAPI;
-                                if (api?.setTechnicalInterviewVisionFirst) {
-                                    api.setTechnicalInterviewVisionFirst(next);
-                                } else {
-                                    window.electronAPI?.setTechnicalInterviewDirectVision?.(next);
-                                }
-                            }}
-                        />
-                    </div>
-
-                    {/* The two cards answer overlapping questions and previously never
-                        referenced each other, leaving the user to reconcile them.
-
-                        The note used to assert "behaves as on-device only" with no
-                        local-model term at all. With the scope off and nothing local
-                        installed the screenshot is DROPPED and the question answered
-                        without it — the opposite of on-device processing, and the same
-                        card's own "Omitted" badge already said so. Each branch below
-                        states what actually happens, mirroring visionPolicy.ts. */}
-                    {!visionLocalOnly && providerDataScopes.screenshots === false && (
-                        <div className="flex items-start gap-2 pt-3 border-t" style={{ borderColor: 'var(--aip-divider)' }}>
-                            <Info size={12} strokeWidth={1.75} className="aip-faint shrink-0 mt-0.5" aria-hidden="true" />
-                            <p className="aip-meta leading-relaxed">
-                                {localFallbackAvailable
-                                    ? t('Screenshots are already blocked from cloud providers by the data scope below, so your local vision model handles them.')
-                                    : visionRequired
-                                        ? t('Screenshots are blocked from cloud providers by the data scope below, and no local vision model is installed. Screenshot questions will be refused rather than answered without the image.')
-                                        : t('Screenshots are blocked from cloud providers by the data scope below, and no local vision model is installed — so the screenshot is discarded and the question is answered without it.')}
-                            </p>
-                        </div>
-                    )}
-                </div>
-            </div>
+            {/* Screenshots card MOVED to the new "Screen & Vision" top-level Settings
+                tab (ScreenVisionSettings.tsx, 2026-09-28) — was buried here. */}
 
             {/* Cloud Provider Data Scopes — fail-closed cloud share controls.
                 Was six equal-weight rows of bare nouns, each growing a WRAPPED second

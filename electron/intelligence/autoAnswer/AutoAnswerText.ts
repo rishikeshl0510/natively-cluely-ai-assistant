@@ -107,3 +107,24 @@ export function joinTranscriptParts(parts: ReadonlyArray<{ text: string; glueNex
     }
     return out.replace(/\s+/g, ' ').trim();
 }
+
+/**
+ * A trailing conjunction/preposition/filler, or a dangling comma, with no
+ * terminal punctuation — the shape of a sentence that got cut by a pause
+ * exceeding STABILITY_MS rather than one that actually finished.
+ *
+ * Used once, at the commit stoppage, to extend the wait instead of judging
+ * and answering the first half of a still-forming question — the exact
+ * "mid-sentence breath" risk STABILITY_MS's own comment calls out. A literal
+ * '?' or other terminal punctuation always wins (checked first), so a real
+ * short question is never delayed by this.
+ */
+const TRAILING_INCOMPLETE_WORD_RE =
+    /\b(?:and|so|but|or|because|since|when|while|if|that|which|to|of|for|with|in|on|at|is|are|was|were|the|a|an|um|uh)$/i;
+export function looksIncomplete(text: string): boolean {
+    const t = text.trim();
+    if (!t) return false;
+    if (/[.?!'"’”]\s*$/.test(t)) return false;
+    if (/,\s*$/.test(t)) return true;
+    return TRAILING_INCOMPLETE_WORD_RE.test(t);
+}
