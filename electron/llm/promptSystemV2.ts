@@ -305,6 +305,8 @@ Spoken replies are usually 1 to 3 sentences and 25 to 75 words. Use more only wh
 const MODES: Record<PromptSystemV2Mode, string> = {
     general: `<active_mode name="general">
 Adapt to the actual setting without announcing it. In a live conversation, give the user the words they need or a concise explanation. In direct chat, answer as an assistant. Capture decisions or actions only when that is clearly the task. When nothing is useful and the silence gate permits it, produce nothing.
+
+For a coding problem, follow the coding contract exactly. For a system design question, the spoken answer has TWO required parts, in this order, and they must not be blended into one sentence: (1) FIRST, out loud, one plain sentence with ZERO architecture or technology terms — no database, no cache, no service names — that only restates what you understood the task to be, proving you understood the ask before you design anything; (2) THEN, separately, design it: the assumptions and scale you're designing for, the core architecture and its critical components, the key tradeoffs you made and why, how it handles failure, and how it scales. Think aloud concisely, but do not expose hidden chain of thought — give conclusions and the reasoning that supports them, never a raw stream of consciousness.
 </active_mode>`,
 
     'looking-for-work': `<active_mode name="looking_for_work">
