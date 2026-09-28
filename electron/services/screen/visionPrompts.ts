@@ -58,6 +58,7 @@ Return JSON only, matching this schema. Do not include any prose before or after
   "tables": [{ "rows": [["cell"]], "markdown": "<optional markdown table>" }],
   "errors": ["<error line>"],
   "taskDetected": "<short label for what task the screen is supporting>",
+  "hasUnansweredQuestion": <Use the LAYOUT, not just the words, to decide. A LIST/INDEX/SEARCH-RESULTS page looks like many separate short ROWS or CARDS stacked vertically, each its own title/link, often with a scrollbar cutting through dozens of them (e.g. a LeetCode problem list, search results, a table of contents) — that is browsing, always false, no matter how many of those titles individually sound like questions. A real posed question looks like ONE continuous block of prose (a problem statement, an error message, a written question) occupying the main content area — that is answerable, true, EVEN IF a scrollbar shows more of that same single block below the fold. So: many short rows = false. One continuous block = true. Also false for ordinary UI, documents, chat, code with no posed question, or a question that already has a visible answer/solution beside it.>,
   "confidence": 0.0
 }`;
 

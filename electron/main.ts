@@ -1222,7 +1222,7 @@ import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { isIntelligenceFlagEnabled } from "./intelligence/intelligenceFlags"
-import { buildJudgePrompt } from "./intelligence/autoAnswer/AutoAnswerJudge"
+import { buildJudgePrompt, buildCandidateJudgePrompt } from "./intelligence/autoAnswer/AutoAnswerJudge"
 import { SimpleAutoAnswerEngine } from "./intelligence/autoAnswer/SimpleAutoAnswer"
 import { resolveAutoAnswerThresholds } from "./context-intelligence/policies/mode-policy-registry"
 import type { SpeechEdge } from "./audio/speechEdge"
@@ -3367,7 +3367,8 @@ export class AppState {
       judgeCandidate: async (req) => {
         const llm = this.processingHelper?.getLLMHelper?.();
         if (!llm) return null;
-        return await llm.generateJudgeVerdict(buildJudgePrompt(req));
+        const prompt = req.perspective === 'candidate' ? buildCandidateJudgePrompt(req) : buildJudgePrompt(req);
+        return await llm.generateJudgeVerdict(prompt);
       },
     }),
     modeName: () => {
@@ -7475,20 +7476,33 @@ export class AppState {
     const session = this.createScreenshotCaptureSession(captureKind, restoreFocus);
     this.screenshotCaptureInProgress = true;
 
+    // Undetectable mode already applies setContentProtection(true) to every
+    // Natively window (overlayWindow.setContentProtection, WindowHelper.ts) —
+    // on Windows that's WDA_EXCLUDEFROMCAPTURE, a compositor-level flag that
+    // excludes the window from ANY capture call, including one made from this
+    // same process. When it's active, the window is already invisible to
+    // desktopCapturer without hiding it — the hide/opacity-0/restore dance is
+    // then pure redundant blink for the user (2026-09-28, explicit direction:
+    // "hidden for the AI is fine, hiding/showing for the user is too much").
+    // Skip it in that case; keep the existing hide/restore as the fallback
+    // for when Undetectable is off and content protection isn't active.
+    const alreadyExcludedFromCapture = this.isUndetectable;
     try {
-      this.hideWindowsForScreenshot(session);
-      // setOpacity(0) makes the window invisible to the compositor immediately
-      // (within the current frame). hide() removes it from the event dispatch
-      // tree synchronously. One compositor frame flush (~16ms) is enough for
-      // macOS to stop including the window in the next capture frame. We wait
-      // 80ms to give the GPU render server one full v-sync cycle + overhead,
-      // which consistently avoids the black-frame artifact without the
-      // excessive 150ms latency the old value imposed.
-      await new Promise(resolve => setTimeout(resolve, process.platform === 'darwin' ? 80 : 40));
+      if (!alreadyExcludedFromCapture) {
+        this.hideWindowsForScreenshot(session);
+        // setOpacity(0) makes the window invisible to the compositor immediately
+        // (within the current frame). hide() removes it from the event dispatch
+        // tree synchronously. One compositor frame flush (~16ms) is enough for
+        // macOS to stop including the window in the next capture frame. We wait
+        // 80ms to give the GPU render server one full v-sync cycle + overhead,
+        // which consistently avoids the black-frame artifact without the
+        // excessive 150ms latency the old value imposed.
+        await new Promise(resolve => setTimeout(resolve, process.platform === 'darwin' ? 80 : 40));
+      }
       return await capture(session);
     } finally {
       try {
-        this.restoreWindowsAfterScreenshot(session);
+        if (!alreadyExcludedFromCapture) this.restoreWindowsAfterScreenshot(session);
       } finally {
         this.screenshotCaptureInProgress = false;
       }
@@ -7512,9 +7526,32 @@ export class AppState {
   private liveScreenContext: ScreenUnderstandingResult | null = null;
   private liveScreenContextRefreshPromise: Promise<void> | null = null;
   private liveScreenContextIntervalTimer: ReturnType<typeof setInterval> | null = null;
-  private static readonly LIVE_SCREEN_CONTEXT_FRESH_MS = 15_000;
+  // Tightened from 15s (2026-09-28, "even if unchanged that's fine, but a
+  // real change must be picked up") — this is how often the real describe
+  // call re-runs and gets a chance to notice a change via its own output,
+  // now that there's no separate cheap pre-check deciding when to bother.
+  // NOT pushed all the way down to a few seconds: every capture (this one
+  // included) briefly hides the Natively overlay (opacity 0, ~40ms wait +
+  // capture time on Windows) so it isn't captured — doing that on a very
+  // tight clock, indefinitely, for the whole session is a visible blink for
+  // the user, not just an AI-side concern (explicit 2026-09-28 direction:
+  // hiding FOR the capture is fine, constant hide/show for the user is not).
+  // 10s is a middle ground between that and picking up a real change promptly.
+  private static readonly LIVE_SCREEN_CONTEXT_FRESH_MS = 10_000;
   private static readonly LIVE_SCREEN_CONTEXT_STALE_CEILING_MS = 45_000;
   private static readonly LIVE_SCREEN_CONTEXT_INFLIGHT_WAIT_MS = 700;
+  // ── Change detection (2026-09-28, user request: "let AI decide whether
+  // page has changed or not", not a pixel/hash heuristic) ──────────────
+  // A perceptual-hash pre-check was tried and measured live: a real page
+  // navigation to a DIFFERENT coding question (same site template, shared
+  // header/sidebar) only moved the hash 0.054 — under any threshold that
+  // also rejects real noise — so it silently never forced a fresh describe
+  // at all. Removed. The real describe call's own extractedText comparison
+  // (see maybeAutoAnswerFromScreenChange's dedup) is what decides "did this
+  // change", using the same vision model already doing the looking, not a
+  // second, cruder signal guessing at pixels. LIVE_SCREEN_CONTEXT_FRESH_MS
+  // was tightened below so that comparison actually runs often enough to
+  // notice a change promptly.
 
   /**
    * Periodic capture, independent of speech (2026-09-15, explicit direction
@@ -7544,6 +7581,145 @@ export class AppState {
       clearInterval(this.liveScreenContextIntervalTimer);
       this.liveScreenContextIntervalTimer = null;
     }
+    this.lastScreenTriggeredText = null;
+    this.recentScreenTexts = [];
+  }
+
+  /** Screen text this session has already auto-answered from — dedup so the
+   *  SAME on-screen question doesn't re-fire on every periodic re-describe. */
+  private lastScreenTriggeredText: string | null = null;
+  /** Rolling buffer of recent extractedText snapshots — see the "scrolling"
+   *  note on maybeAutoAnswerFromScreenChange for why this exists. */
+  private recentScreenTexts: string[] = [];
+  private static readonly MAX_RECENT_SCREEN_TEXTS = 4;
+
+  /**
+   * Screen-only auto-answer (2026-09-28, user request): when the screen
+   * changes and the new description reads as a NEW question/problem — not
+   * just any visual change — fire an answer the same way a spoken question
+   * would, even with nobody talking. Deliberately conservative: this must
+   * not fire on a window switch, a scroll, a cursor blink, or generic UI
+   * chrome — only on content that structurally looks like a question or a
+   * coding problem, per the user's explicit scoping ("vision model flags a
+   * new question/problem", not "any meaningful visual change").
+   *
+   * NOT live-tested end-to-end (requires an actual changing screen + a real
+   * vision-model call in a running meeting) — typechecked and reasoned
+   * through, but flag this explicitly as unverified against a real session.
+   */
+  private async maybeAutoAnswerFromScreenChange(): Promise<void> {
+    if (!this._autoAnswerEnabled) { console.log('[LiveScreenContext] screen-trigger: skipped, auto-answer is off'); return; }
+    if (!this.isMeetingActive) { console.log('[LiveScreenContext] screen-trigger: skipped, no meeting active'); return; }
+    if (!this.intelligenceManager.canAutoAnswer()) { console.log('[LiveScreenContext] screen-trigger: skipped, engine not accepting'); return; }
+    if (this.intelligenceManager.isAnswerStreaming()) { console.log('[LiveScreenContext] screen-trigger: skipped, already streaming an answer'); return; }
+    // Audio/visual coordination (2026-09-28, explicit user request: "switch
+    // between audio or visual... take into account both"). The interviewer
+    // may be actively asking something right now — possibly ABOUT the very
+    // question on screen, possibly something else entirely — and that
+    // spoken question already gets screen context attached when it resolves
+    // (resolveLiveScreenContextForAnswer in the speech dispatch path). Firing
+    // the screen-only trigger while speech is still forming would answer the
+    // screen alone, ahead of and disconnected from the question actually
+    // being asked. Defer: the next tick (LIVE_SCREEN_CONTEXT_FRESH_MS later)
+    // re-checks, so this never permanently blocks the screen trigger, only
+    // yields to speech that's in progress right now.
+    if (this.simpleAutoAnswer.hasPendingInterviewerSpeech()) { console.log('[LiveScreenContext] screen-trigger: skipped, interviewer is mid-speech — deferring to it'); return; }
+    const result = this.liveScreenContext;
+    if (!result || result.status !== 'available') { console.log('[LiveScreenContext] screen-trigger: skipped, no available screen context'); return; }
+    const text = (result.extractedText || result.visibleSummary || '').trim();
+    if (!text) { console.log('[LiveScreenContext] screen-trigger: skipped, no text extracted'); return; }
+
+    // Scrolling support (2026-09-28, user request): a long question that
+    // needs scrolling to read in full is only ever PARTIALLY visible in any
+    // one capture — the top is gone once scrolled past. Keep a small rolling
+    // buffer of recent captures (this periodic describe now runs every
+    // LIVE_SCREEN_CONTEXT_FRESH_MS) so scrolling through a long problem over
+    // a few ticks can still be answered from the FULL text, not just
+    // whatever happened to be on screen for the capture that crossed the
+    // question-detection bar. Only distinct captures are kept — an unchanged
+    // screen between ticks must not pad the buffer with repeats.
+    if (this.recentScreenTexts[this.recentScreenTexts.length - 1] !== text) {
+      this.recentScreenTexts.push(text);
+      if (this.recentScreenTexts.length > AppState.MAX_RECENT_SCREEN_TEXTS) this.recentScreenTexts.shift();
+    }
+
+    // Similarity dedup, not exact-match (2026-09-28 live trace): a YouTube
+    // "mock interview" video re-triggered THREE times on essentially the
+    // same page — OCR read "AI" as "Al" between captures, and a playing
+    // video's URL timestamp param shifts every tick, so the text was never
+    // byte-identical even though nothing meaningfully changed. Word-overlap
+    // in both directions catches "basically the same content" the way exact
+    // string equality can't.
+    if (this.lastScreenTriggeredText) {
+      const { tokenContainment } = require('./intelligence/autoAnswer/AutoAnswerText') as typeof import('./intelligence/autoAnswer/AutoAnswerText');
+      const similarity = Math.min(
+        tokenContainment(text, this.lastScreenTriggeredText),
+        tokenContainment(this.lastScreenTriggeredText, text),
+      );
+      // Lowered from 0.85 (2026-09-28 live trace): the same YouTube video
+      // still fired twice before dedup caught the third repeat — the
+      // browser chrome/menu text visible in two captures of the SAME page
+      // differed enough (URL bar shown/hidden, etc.) to land under 0.85.
+      if (similarity >= 0.75) {
+        console.log(`[LiveScreenContext] screen-trigger: skipped, ${(similarity * 100).toFixed(0)}% similar to the last triggered text (dedup)`);
+        return;
+      }
+    }
+
+    // Classified by the SAME vision call that produced this text (2026-09-28,
+    // user request: "ask AI", "no regex" — the vision model itself decides,
+    // as one field in its existing structured-extraction JSON, not a second
+    // call and not a pattern-match on the transcribed text after the fact).
+    // See STRUCTURED_EXTRACTION_SYSTEM_PROMPT (visionPrompts.ts) for exactly
+    // what it's instructed to mean by this.
+    console.log(`[LiveScreenContext] screen-trigger: hasUnansweredQuestion=${result.hasUnansweredQuestion} text="${text.slice(0, 150).replace(/\n/g, ' ')}${text.length > 150 ? '…' : ''}"`);
+    if (!result.hasUnansweredQuestion) return;
+
+    // Merge the recent scroll-window captures into one combined text, oldest
+    // first (reading order) — this is what actually reaches the answer
+    // engine, not just the single capture that tripped the question check.
+    const combinedText = this.recentScreenTexts.join('\n---\n');
+    console.log(`[LiveScreenContext] screen-trigger: merging ${this.recentScreenTexts.length} recent capture(s) into the question (combined length=${combinedText.length})`);
+    this.lastScreenTriggeredText = text;
+    this.recentScreenTexts = [];
+    const now = Date.now();
+    const id = `${this._meetingGeneration}-screen${now}`;
+    const question: import('./intelligence/autoAnswer/AutoAnswerTypes').AutoAnswerQuestion = {
+      id,
+      text: combinedText,
+      confidence: 0.8,
+      answerability: 0.8,
+      completionConfidence: 1,
+      dialogueAct: 'general_question',
+      isFollowUp: false,
+      followUpTarget: '',
+      startedAt: now,
+      lastUpdatedAt: now,
+      committedAt: now,
+      sourceSegments: [],
+      candidateGeneration: 0,
+      meetingGeneration: this._meetingGeneration,
+    };
+    try {
+      this.sendToWindow(this.getMainWindow(), 'intelligence-auto-answer-started', {});
+    } catch { /* UI hint only */ }
+    let activeSkill: { id: string; name: string; promptBlock: string } | undefined;
+    try {
+      const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+      const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
+      const enabledSkills = SkillsManager.getInstance().listSkills().filter((s: any) => s.enabled !== false);
+      const autoMatch = matchSkillForMessage(text, enabledSkills);
+      if (autoMatch) {
+        const autoSkill = SkillsManager.getInstance().getSkill(autoMatch.skillId);
+        if (autoSkill) {
+          activeSkill = { id: autoSkill.id, name: autoSkill.name, promptBlock: SkillsManager.getInstance().buildPromptBlock(autoSkill) };
+        }
+      }
+    } catch { /* non-fatal, answer without a skill */ }
+    console.log(`[LiveScreenContext] auto-answer triggered from screen change alone (no speech): "${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`);
+    await this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative: false, screenContext: result, activeSkill }).catch((error) => {
+      console.warn('[LiveScreenContext] screen-triggered auto-answer failed:', error);
+    });
   }
 
   private liveScreenContextGateOpen(): { open: boolean; mode?: string; scopesAllow?: boolean } {
@@ -7676,6 +7852,18 @@ export class AppState {
             });
           } catch { /* UI hint only — never fail the refresh over a send error */ }
         }
+        // Evaluate for a screen-only auto-answer on EVERY successful describe
+        // — not only when the fast hash-check detected a change. A question
+        // already on screen before monitoring started (or present on the
+        // very first, baseline-setting capture) never registers as a
+        // "change" against itself, so gating this behind the change-check
+        // alone made it permanently invisible (user report, 2026-09-28:
+        // "I just share my computer, it should understand there's something
+        // asked and start the answer" — including on the very first look,
+        // not only after a subsequent edit). maybeAutoAnswerFromScreenChange
+        // still dedupes on the exact text, so this can't repeat-fire on an
+        // unchanged screen across ticks.
+        await this.maybeAutoAnswerFromScreenChange();
       }
     } catch (err: any) {
       console.warn('[LiveScreenContext] refresh failed (non-fatal):', err?.message || err);

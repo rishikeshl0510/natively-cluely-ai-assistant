@@ -30,15 +30,17 @@
  * Judge unavailable → almost-legacy fallback: dispatch only when the stopped
  * speech ends with '?'.
  *
- * ONE exception (2026-09-28): a candidate utterance that is itself
- * uncertainty/confirmation-seeking phrasing directed at the interviewer —
- * "so do you want me to do this?", "should I just go with X?" — still gets
- * judged. Grammatically it's addressed to the interviewer, not a question for
- * the assistant, but it signals the candidate is unsure and a suggested
- * answer helps most exactly there. This is a SEPARATE, narrow path
- * (CANDIDATE_UNCERTAINTY_RE + its own debounce) that never touches the
- * interviewer `pending` array — ordinary candidate speech (the vast
- * majority) remains fully inert, as above.
+ * ONE exception (2026-09-28, refined same day from a regex to an AI judgment):
+ * a candidate utterance that is itself uncertainty/confirmation-seeking
+ * directed at the interviewer — "so do you want me to do this?", "should I
+ * just go with X?" — still gets judged. Grammatically it's addressed to the
+ * interviewer, not a question for the assistant, but it signals the candidate
+ * is unsure and a suggested answer helps most exactly there. This is a
+ * SEPARATE, narrow path (its own debounce, buildCandidateJudgePrompt's own
+ * framing — see AutoAnswerJudge.ts) that never touches the interviewer
+ * `pending` array — ordinary candidate speech (the vast majority) is still
+ * judged "silent" by that same prompt's own default-to-silent rule, so it
+ * remains effectively inert without a hardcoded phrase list deciding that.
  */
 
 import type { TranscriptSegment } from '../../SessionTracker';
@@ -215,16 +217,6 @@ export const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
  * than waiting indefinitely.
  */
 export const INCOMPLETE_EXTRA_WAIT_MS = 1500;
-/**
- * A candidate (user-channel) utterance that is itself uncertainty or
- * confirmation-seeking phrasing directed at the interviewer. See the file
- * header's 2026-09-28 note. Deliberately conservative — this is the ONE hole
- * in an otherwise-inert channel, so a false positive fires the judge (cheap)
- * on ordinary candidate speech, but a false negative just means the existing
- * (correct) inert behavior continues.
- */
-export const CANDIDATE_UNCERTAINTY_RE =
-    /\b(?:do you want me to|would you (?:like|want) me to|should i\b|shall i\b|is that (?:right|correct|okay|ok|fine|alright)\??|is this (?:right|correct|okay|ok|fine|alright)\??|am i (?:supposed|meant|allowed) to|does that (?:make sense|sound (?:right|ok|good)|work for you)\??|do you (?:need|want) me to|so should i\b)\b/i;
 /** Debounce for the candidate-uncertainty path, mirroring STABILITY_MS. */
 export const CANDIDATE_STABILITY_MS = 1200;
 /**
@@ -371,6 +363,17 @@ export class SimpleAutoAnswerEngine {
 
     setThresholds(t: AutoAnswerThresholds): void { this.thresholds = t; }
 
+    /**
+     * Is the interviewer's utterance still forming — final segments already
+     * pending, not yet judged/dispatched? (2026-09-28, audio/visual
+     * coordination request.) Lets an INDEPENDENT trigger source (the
+     * screen-only auto-answer in main.ts) defer to a spoken question that's
+     * actively being asked right now, rather than racing ahead and
+     * answering the screen while the real, more specific question is still
+     * being spoken. Read-only — never mutates engine state.
+     */
+    hasPendingInterviewerSpeech(): boolean { return this.pending.length > 0; }
+
     /** Every supersede goes through here so the telemetry can name the cause. */
     private bumpJudgeSeq(cause: NonNullable<AutoAnswerTelemetryEvent['supersededBy']>): void {
         this.judgeSeq++;
@@ -444,13 +447,19 @@ export class SimpleAutoAnswerEngine {
         // The user starts answering as soon as the question lands. Their
         // speech must not cancel the stream, clear the candidate, or drop a
         // parked / deferred verdict — the answer is wanted precisely while
-        // they are talking. This branch does none of that: it only watches
-        // for a FINAL candidate utterance that is itself uncertainty/
-        // confirmation-seeking phrasing (see CANDIDATE_UNCERTAINTY_RE and the
-        // 2026-09-28 file-header note), on its own debounce, never touching
-        // `pending`/`timer`.
+        // they are talking. This branch does none of that: it debounces every
+        // FINAL candidate utterance on its own timer, never touching
+        // `pending`/`timer`, and lets the JUDGE decide whether it's genuine
+        // confirmation-seeking worth a suggested response (2026-09-28: "regex
+        // not required, let's have AI as a judge" — replaced
+        // CANDIDATE_UNCERTAINTY_RE, which only recognized a fixed list of
+        // phrasings, with buildCandidateJudgePrompt's own dedicated framing,
+        // the same way the interviewer channel is judged rather than
+        // pattern-matched). A cheap word-count floor stays, matching the
+        // interviewer channel's own cost discipline — a single word is never
+        // worth a judge call either way.
         if (!segment.final || !text) return;
-        if (!CANDIDATE_UNCERTAINTY_RE.test(text)) return;
+        if (text.split(/\s+/).filter(Boolean).length < 2) return;
         this.candidateCandidate = { text, at: now };
         if (this.candidateTimer) this.clock.clearTimeout(this.candidateTimer);
         this.candidateTimer = this.clock.setTimeout(() => {
@@ -489,7 +498,7 @@ export class SimpleAutoAnswerEngine {
         _atrace(`${id} candidate-uncertainty fired — sending to judge`);
         this.host.noteCandidate?.(id, this.sequence);
         this.maybePrefetch(id, candidate, now);
-        void this.consult(id, candidate, now, false);
+        void this.consult(id, candidate, now, false, 'candidate');
     }
 
     // ── the stoppage ──────────────────────────────────────────────────────
@@ -612,7 +621,7 @@ export class SimpleAutoAnswerEngine {
         } catch { /* prefetch is an optimisation; never break the pipeline */ }
     }
 
-    private async consult(id: string, candidate: string, committedAt: number, early = false): Promise<void> {
+    private async consult(id: string, candidate: string, committedAt: number, early = false, perspective: 'interviewer' | 'candidate' = 'interviewer'): Promise<void> {
         const seq = this.judgeSeq;
         const generation = this.host.meetingGeneration();
         let timer: ClockTimer | null = null;
@@ -634,6 +643,7 @@ export class SimpleAutoAnswerEngine {
                         modeName: this.host.modeName?.() ?? null,
                         questionId: id,
                         lastAnsweredText: this.lastAnsweredText,
+                        perspective,
                     }),
                     new Promise<null>((resolve) => {
                         timer = this.clock.setTimeout(() => { timedOut = true; resolve(null); }, JUDGE_DEADLINE_MS);

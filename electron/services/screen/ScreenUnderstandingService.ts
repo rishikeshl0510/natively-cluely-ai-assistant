@@ -129,6 +129,12 @@ export interface ScreenUnderstandingResult {
   tables?: Array<{ title?: string; rows: string[][]; markdown?: string }>;
   errors?: string[];
   taskDetected?: string;
+  /** Vision-model classification (2026-09-28): does the screen show an
+   *  unanswered question/problem worth auto-answering, as judged by the SAME
+   *  call that produced extractedText — no separate classifier call. Only
+   *  populated on the structured-extraction path (userAction 'transcribe');
+   *  undefined on other paths, treat as false. */
+  hasUnansweredQuestion?: boolean;
   confidence: number;
   imagePaths: string[];
   optimizedImagePath?: string;
@@ -453,8 +459,15 @@ export class ScreenUnderstandingService {
     screenType?: ScreenType;
     taskDetected?: string;
     confidence?: number;
+    hasUnansweredQuestion?: boolean;
   } {
-    const trimmed = rawOutput.trim();
+    // Strip a markdown code fence before the strict {...} check (2026-09-28,
+    // live trace): despite "Return JSON only" in the prompt, the model
+    // sometimes wraps its output as ```json\n{...}\n``` anyway. The old
+    // strict startsWith('{')/endsWith('}') check then fell straight through
+    // to the plain-text fallback path, silently losing EVERY structured
+    // field — including hasUnansweredQuestion, with no error or warning.
+    const trimmed = rawOutput.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
       try {
         const parsed = JSON.parse(trimmed);
@@ -467,6 +480,7 @@ export class ScreenUnderstandingService {
           screenType: typeof parsed.screenType === 'string' ? parsed.screenType : undefined,
           taskDetected: typeof parsed.taskDetected === 'string' ? parsed.taskDetected : undefined,
           confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined,
+          hasUnansweredQuestion: typeof parsed.hasUnansweredQuestion === 'boolean' ? parsed.hasUnansweredQuestion : undefined,
         };
       } catch {
         // fall through to plain-text path
@@ -567,6 +581,7 @@ export class ScreenUnderstandingService {
       tables: structured.tables,
       errors: structured.errors,
       taskDetected,
+      hasUnansweredQuestion: structured.hasUnansweredQuestion ?? false,
       confidence: structured.confidence ?? 0.85,
       imagePaths: ctx.imagePaths,
       imageHash: ctx.imageHash,

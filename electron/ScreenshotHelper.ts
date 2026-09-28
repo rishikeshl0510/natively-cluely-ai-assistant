@@ -108,6 +108,24 @@ function getDisplayContainingRect(rect: Electron.Rectangle): Electron.Display {
  */
 const MAX_THUMBNAIL_RATIO = 10;
 
+// Chromium's desktopCapturer caches its internal thumbnail PER REQUESTED
+// SIZE — calling getSources() repeatedly with the exact same thumbnailSize
+// (the normal case here: displayBounds never changes between calls) can
+// return the SAME cached frame instead of a fresh grab of the current
+// screen. Confirmed live (2026-09-28): consecutive captures produced
+// byte-identical PNGs (matching MD5) despite real, visible screen changes in
+// between. Toggling the requested width by 1px each call is the standard
+// workaround — it makes every request look like a "different size" to
+// Chromium's cache without any visible effect on the output (the crop math
+// downstream already reads the ACTUAL returned image size via
+// image.getSize() rather than assuming the requested size, so this 1px
+// wobble never needs to be accounted for elsewhere).
+let _thumbnailSizeToggle = false;
+function nextThumbnailWidth(baseWidth: number): number {
+  _thumbnailSizeToggle = !_thumbnailSizeToggle;
+  return baseWidth + (_thumbnailSizeToggle ? 1 : 0);
+}
+
 /**
  * Maps an absolute-screen selection rectangle into crop coordinates in a
  * desktopCapturer thumbnail's pixel space.
@@ -214,9 +232,11 @@ async function getDisplaysIntersectingSelection(
   }
 
   try {
+    // See nextThumbnailWidth's doc comment — same stale-thumbnail-cache risk
+    // as the full-screenshot path, since maxWidth is stable between calls.
     sources = await desktopCapturer.getSources({
       types: ['screen'],
-      thumbnailSize: { width: maxWidth, height: maxHeight }
+      thumbnailSize: { width: nextThumbnailWidth(maxWidth), height: maxHeight }
     });
   } catch (error) {
     console.error('[ScreenshotHelper] Failed to get desktop sources:', error);
@@ -521,7 +541,12 @@ export class ScreenshotHelper {
       // either case. (Assuming native pixels + multiplying by scaleFactor is exactly
       // the latent bug that turned right/bottom selections into full-screen captures.)
       const thumbnailSize = {
-        width: displayBounds.width,
+        // See nextThumbnailWidth's doc comment: Chromium caches getSources()
+        // thumbnails by requested size, and displayBounds is stable between
+        // calls, so an unperturbed width here can return the SAME cached
+        // frame every time — confirmed live via matching MD5 checksums on
+        // consecutive captures.
+        width: nextThumbnailWidth(displayBounds.width),
         height: displayBounds.height
       };
 

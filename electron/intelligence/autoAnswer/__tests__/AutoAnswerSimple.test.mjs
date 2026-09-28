@@ -183,7 +183,14 @@ test('the user\'s own speech never suppresses or cancels an automatic answer (us
   // The user answers the moment the question lands — they do not sit in
   // silence waiting for the overlay. So the mic channel must be inert: no
   // barge-in cancel, no "user is answering" skip, no cleared candidate.
-  const h = makeSimple(async () => YES());
+  // Perspective-aware, matching what buildCandidateJudgePrompt actually
+  // instructs the real judge to do: answer interviewer questions, stay
+  // silent on the candidate's own ordinary talking (2026-09-28 — the
+  // candidate channel is no longer gated by a fixed regex, so an ordinary
+  // candidate sentence now DOES reach the judge; this mock must reflect the
+  // real judge's own "when in doubt, prefer silent" instruction for it,
+  // not just always say yes).
+  const h = makeSimple(async (req) => req.perspective === 'candidate' ? NO : YES());
   h.interviewer('Okay, have you heard of the popular word game called wordle?');
   await h.advance(300);
   h.user('Yeah.');
@@ -239,7 +246,10 @@ test('meeting stop clears everything; telemetry carries no transcript text', asy
 // ── Review fixes (2026-08-25): six confirmed findings, each pinned ────────
 
 test('a dispatch parked behind a busy engine survives the user talking and fires when the engine frees up', async () => {
-  const h = makeSimple(async () => YES(), { accepting: false });
+  // Perspective-aware — see the "own speech never suppresses" test above for
+  // why: the candidate's ordinary answer now also reaches the judge, and the
+  // real judge is instructed to stay silent on it.
+  const h = makeSimple(async (req) => req.perspective === 'candidate' ? NO : YES(), { accepting: false });
   h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await h.advance(STABILITY_MS + 200);                    // verdict auto → retry loop armed
   assert.deepEqual(h.texts(), []);
