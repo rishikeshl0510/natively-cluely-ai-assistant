@@ -64,13 +64,12 @@ export const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh
  * quiet" direction) -> 1200ms (2026-09, same week, after live latency testing
  * showed the full response chain — this wait + retrieval/generation + reveal
  * — felt too slow end-to-end with no manual override left as a fallback).
- * 1200ms is a middle ground: still meaningfully calmer than the original
- * 900ms default, but a real ~800ms cut off the 2000ms value once it was
- * actually felt live. Tune against real sessions rather than assuming this
- * exact value is final — this is a deliberate behavior tradeoff (speed vs.
- * risk of firing on a mid-sentence breath), not a fixed constant.
+ * Reverted back to the original 900ms after live use: 1200ms made the
+ * answer noticeably lag the interviewer stopping, which is worse than the
+ * small risk of firing on a mid-sentence breath. Tune against real sessions
+ * rather than assuming this exact value is final.
  */
-export const STABILITY_MS = 1200;
+export const STABILITY_MS = 900;
 /**
  * Quiet needed before the judge is ASKED, as opposed to before the answer is
  * COMMITTED (that stays STABILITY_MS).
@@ -88,11 +87,9 @@ export const STABILITY_MS = 1200;
  * touches the answer engine, whereas prefetching the ANSWER early would take
  * activeMode out of idle and park the real dispatch behind a junk generation.
  *
- * Unchanged by the STABILITY_MS bump above: this is an ABSOLUTE "has the
- * interviewer paused at all" threshold, not STABILITY_MS-relative — it fires
- * at the same 120ms regardless of how long the full commit wait is. A longer
- * STABILITY_MS only gives the ~1.3s judge call MORE headroom to finish before
- * the (now 2000ms) commit point, so this stays correct without adjustment.
+ * Independent of STABILITY_MS: this is an ABSOLUTE "has the interviewer
+ * paused at all" threshold, not STABILITY_MS-relative — it fires at the same
+ * 120ms regardless of how long the full commit wait is.
  */
 export const EARLY_JUDGE_MS = 120;
 /** A provider endpoint (speech_final / <end>) confirms the stop: shorten the wait. */
