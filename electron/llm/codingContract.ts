@@ -35,7 +35,10 @@ export const CODING_SECTION_HEADINGS: readonly string[] = CODING_SECTIONS.map(s 
 export const CODING_CONTRACT = `CODING / DSA RESPONSE CONTRACT — output these EXACT markdown headings, in THIS order, with nothing before the first heading:
 
 ## Approach
-- Short, interview-speakable explanation of the idea. Optimized approach clearly; brute force only if useful.
+- TWO separate parts, in this order, both inside this section:
+  1. First, in ONE plain sentence, state WHAT the problem is asking — conceptually, in your own words, with ZERO solution language (no data structure, no algorithm name, no "I will", no mention of HOW you'll solve it). This is purely "here is what I understand the task to be", proving you understood it before you solve it. Example shape: "So this is asking me to find two numbers in the array that add up to a given target." — nothing about hash maps or loops belongs in this sentence.
+  2. THEN, separately, explain HOW you'll solve it: the idea, optimized approach clearly, brute force only if useful.
+  Do not blend the two into one sentence — the restatement must be solution-free on its own.
 
 ## Technique / Data Structure / Algorithm Used
 - Name the core DSA concept/data structure/algorithm (e.g. two pointers, sliding window, hash map, stack, queue, binary search, DP, BFS/DFS, heap, trie, union-find, recursion, backtracking).
@@ -59,7 +62,7 @@ Every heading is mandatory and must appear verbatim (with the \`## \` prefix). E
  * A compact one-line variant of the contract for tiny-model prompts where token
  * budget is tight but the SAME heading contract must hold.
  */
-export const CODING_CONTRACT_TINY = `Coding/DSA answers MUST use these EXACT markdown headings, in order, nothing before the first: "## Approach", "## Technique / Data Structure / Algorithm Used", "## Code" (one fenced block tagged with the language you actually wrote — Java is \`\`\`java, never \`\`\`python), "## Dry Run", "## Complexity" (Time + Space, each "O(...) because ..."), "## Interviewer Follow-up Points". Never start with code. A missing/renamed heading is a failure.`;
+export const CODING_CONTRACT_TINY = `Coding/DSA answers MUST use these EXACT markdown headings, in order, nothing before the first: "## Approach" (FIRST one plain sentence stating WHAT the problem asks with ZERO solution language — no data structure, no algorithm, no "I will" — then SEPARATELY explain HOW you'll solve it), "## Technique / Data Structure / Algorithm Used", "## Code" (one fenced block tagged with the language you actually wrote — Java is \`\`\`java, never \`\`\`python), "## Dry Run", "## Complexity" (Time + Space, each "O(...) because ..."), "## Interviewer Follow-up Points". Never start with code. A missing/renamed heading is a failure.`;
 
 /**
  * Contract for GENERAL IMPLEMENTATION tasks (React components, scripts, utilities,
