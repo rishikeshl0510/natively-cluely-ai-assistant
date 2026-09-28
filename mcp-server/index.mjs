@@ -137,7 +137,24 @@ function skillsDir() {
     return path.join(resolveUserDataPath(), 'skills');
 }
 
-function buildSkillMarkdown({ name, description, instructions }) {
+// Mirrors electron/llm/AnswerPlanner.ts's `AnswerType` union. Duplicated
+// rather than imported: this server runs as plain `node`, outside the
+// Electron/TS build (see the file header), so it has no path to that module.
+// Keep in sync by hand if AnswerPlanner.ts's union changes.
+const ANSWER_TYPES = [
+    'identity_answer', 'profile_fact_answer', 'project_answer', 'skills_answer',
+    'skill_experience_answer', 'experience_answer', 'jd_fit_answer', 'gap_analysis_answer',
+    'jd_summary_answer', 'jd_requirements_answer', 'jd_fact_answer', 'resume_jd_fit_answer',
+    'resume_jd_gap_answer', 'resume_jd_intro_answer', 'behavioral_interview_answer',
+    'project_followup_answer', 'coding_question_answer', 'dsa_question_answer',
+    'technical_concept_answer', 'system_design_answer', 'debugging_question_answer',
+    'negotiation_answer', 'sales_answer', 'product_candidate_mix_answer', 'lecture_answer',
+    'definitional_answer', 'list_answer', 'exact_numeric_answer', 'document_structure_answer',
+    'document_absent_fact_refusal', 'document_followup_answer', 'follow_up_answer',
+    'unknown_answer', 'general_meeting_answer', 'project_link_answer',
+];
+
+function buildSkillMarkdown({ name, description, instructions, answerTypes }) {
     // YAML frontmatter — a bare `key: value` line is enough for the app's
     // parser (parseSkillMarkdown in SkillsManager.ts); no need for a full
     // YAML library. Escaping: wrap in double quotes and escape embedded
@@ -148,7 +165,8 @@ function buildSkillMarkdown({ name, description, instructions }) {
         const str = String(s).replace(/\r\n/g, ' ').replace(/\n/g, ' ').trim();
         return needsQuoting(str) ? `"${str.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : str;
     };
-    return `---\nname: ${yamlValue(name)}\ndescription: ${yamlValue(description)}\n---\n\n${String(instructions).trim()}\n`;
+    const answerTypesLine = answerTypes?.length ? `answerTypes: ${answerTypes.join(', ')}\n` : '';
+    return `---\nname: ${yamlValue(name)}\ndescription: ${yamlValue(description)}\n${answerTypesLine}---\n\n${String(instructions).trim()}\n`;
 }
 
 function findCollectionByName(name) {
@@ -169,20 +187,21 @@ const server = new McpServer({ name: 'natively-interview-knowledge', version: '1
 
 server.tool(
     'create_skill',
-    'Create a new Natively Skill — a Q&A answer template: when a question of a given kind comes up live (typed or spoken and auto-answered), answer it a given way. The topic is unrestricted — coding, behavioral, sales, system design, literally anything — what makes it a Skill is that trigger-plus-template shape, not the subject matter. IMPORTANT: for automatic triggering to work, `description` MUST include the literal trigger wording in double quotes, e.g. \'Use when the user asks to "review this code" or "check my PR"\' — see docs/skills/SKILL_AUTHORING.md for the full guide and examples. A description with no quoted phrases means the skill will never fire automatically (manual-only, which this app no longer has a UI for) — always include at least one quoted trigger phrase unless the skill is intentionally inert.',
+    'Create a new Natively Skill — a Q&A answer template: when a question of a given kind comes up live (typed or spoken and auto-answered), answer it a given way. The topic is unrestricted — coding, behavioral, sales, system design, literally anything — what makes it a Skill is that trigger-plus-template shape, not the subject matter. IMPORTANT: for automatic triggering to work on TWO independent surfaces: (1) manual typed chat needs `description` to include the literal trigger wording in double quotes, e.g. \'Use when the user asks to "review this code" or "check my PR"\'; (2) the LIVE spoken auto-answer surface (the one that matters most — no time to type a prefix mid-interview) instead needs `answerTypes` set, since that surface routes purely on the question\'s classification, not keywords. Always set BOTH unless you have a specific reason not to — see docs/skills/SKILL_AUTHORING.md for the full guide and examples.',
     {
         name: z.string().min(1).describe('Human-readable skill name, e.g. "Code Review Checklist"'),
-        description: z.string().min(1).describe('What KIND of question this answers AND when to trigger it. MUST include at least one double-quoted literal trigger phrase for automatic matching to work, e.g. \'Use when the user asks to "review this code"\'.'),
+        description: z.string().min(1).describe('What KIND of question this answers AND when to trigger it. MUST include at least one double-quoted literal trigger phrase for automatic matching on the manual typed-chat surface, e.g. \'Use when the user asks to "review this code"\'.'),
         instructions: z.string().min(1).describe('The answer template the agent follows once triggered — the concrete shape the answer should take for this question type, written as directives, e.g. "1. State the approach first. 2. Give complexity. 3. Then code."'),
+        answerTypes: z.array(z.enum(ANSWER_TYPES)).optional().describe(`REQUIRED for this skill to fire on the LIVE spoken auto-answer surface — without it, this skill only ever works on manual typed chat. One or more of AnswerPlanner.ts's AnswerType categories this skill answers, e.g. ["system_design_answer"] or ["coding_question_answer", "dsa_question_answer"]. Valid values: ${ANSWER_TYPES.join(', ')}.`),
         overwrite: z.boolean().optional().describe('Overwrite an existing skill with the same id. Default false (refuses if one already exists).'),
     },
-    async ({ name, description, instructions, overwrite }) => {
+    async ({ name, description, instructions, answerTypes, overwrite }) => {
         const id = slugify(name);
         if (!id) return { content: [{ type: 'text', text: 'Could not derive a valid id from that name — use letters, numbers, hyphens, or underscores.' }], isError: true };
         if (BUILTIN_SKILL_IDS.has(id)) {
             return { content: [{ type: 'text', text: `"${id}" collides with a built-in skill and cannot be created or overwritten.` }], isError: true };
         }
-        const markdown = buildSkillMarkdown({ name, description, instructions });
+        const markdown = buildSkillMarkdown({ name, description, instructions, answerTypes });
         if (Buffer.byteLength(markdown, 'utf8') > MAX_SKILL_FILE_BYTES) {
             return { content: [{ type: 'text', text: `Skill content is too large (${Buffer.byteLength(markdown, 'utf8')} bytes, max ${MAX_SKILL_FILE_BYTES}).` }], isError: true };
         }
@@ -196,7 +215,10 @@ server.tool(
         const quotedPhraseCount = (description.match(/"[^"]{2,60}"/g) || []).length;
         const warnings = [];
         if (quotedPhraseCount === 0) {
-            warnings.push('description has no double-quoted trigger phrase — this skill will never fire automatically. Consider revising the description or calling create_skill again with overwrite:true.');
+            warnings.push('description has no double-quoted trigger phrase — this skill will never fire automatically on manual typed chat. Consider revising the description or calling create_skill again with overwrite:true.');
+        }
+        if (!answerTypes?.length) {
+            warnings.push('no answerTypes set — this skill will NEVER fire on the live spoken auto-answer surface (only manual typed chat, via the quoted phrase above). Call create_skill again with overwrite:true and an answerTypes array if this skill should work during a live auto-answered turn.');
         }
         if (instructions.length > MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT) {
             warnings.push(`instructions are ${instructions.length} chars, over the ${MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT}-char live-prompt cap — only the first ${MAX_SKILL_INSTRUCTIONS_CHARS_FOR_PROMPT} chars will actually be sent when this skill fires (the rest is truncated at answer time, to protect live-turn latency). A Skill is meant to be a short answer template, not a document — trim it with overwrite:true.`);

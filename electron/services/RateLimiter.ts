@@ -47,8 +47,19 @@ export class RateLimiter {
      * Acquire a token. Resolves immediately if available.
      * If the bucket is empty, waits up to MAX_QUEUE_DEPTH slots.
      * Throws RateLimitQueueFullError if the queue is full — callers should catch and fail-fast.
+     *
+     * @param priority - When the bucket is already empty, a priority caller
+     *   jumps to the FRONT of the wait queue instead of the back (2026-09-28,
+     *   live session: the auto-answer JUDGE — small, fast, and on the most
+     *   latency-critical path in the app, since nothing downstream can start
+     *   until it returns — was queuing behind unrelated vision/generation
+     *   calls sharing this same limiter, adding real wall-clock delay that
+     *   had nothing to do with the judge call's own speed). Same FIFO
+     *   ordering as before among same-priority callers; this only changes
+     *   where a priority caller is inserted relative to non-priority ones
+     *   already waiting.
      */
-    public async acquire(): Promise<void> {
+    public async acquire(priority = false): Promise<void> {
         this.refill();
 
         if (this.tokens >= 1) {
@@ -64,7 +75,9 @@ export class RateLimiter {
 
         // Wait for a token to become available
         return new Promise<void>((resolve, reject) => {
-            this.waitQueue.push({ resolve, reject });
+            const waiter = { resolve, reject };
+            if (priority) this.waitQueue.unshift(waiter);
+            else this.waitQueue.push(waiter);
         });
     }
 

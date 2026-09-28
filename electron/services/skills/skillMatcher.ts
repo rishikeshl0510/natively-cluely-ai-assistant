@@ -36,6 +36,17 @@
 export interface AutoMatchableSkill {
     id: string;
     description: string;
+    /**
+     * Optional author-declared AnswerType tags (AnswerPlanner.ts's
+     * `AnswerType` union, e.g. 'system_design_answer', 'coding_question_
+     * answer') this skill applies to. Purely additive (2026-09-28, user:
+     * "let that find the correct skill for it, the answertype") — a skill
+     * with no tags behaves exactly as before, keyword-matched only. This
+     * reuses AnswerPlanner's classification, which is computed on every
+     * turn anyway for the coding-contract trigger, so it costs nothing
+     * extra — no new LLM call, unlike a dedicated semantic matcher would.
+     */
+    answerTypes?: string[];
 }
 
 /** Phrases the skill author quoted as literal trigger wording, lowercased. Empty array = this skill never auto-fires. */
@@ -134,4 +145,43 @@ export function matchSkillForMessage(message: string, skills: AutoMatchableSkill
 
     const winner = bestExact ?? bestFuzzy;
     return winner ? { skillId: winner.skillId, matchedPhrase: winner.longestPhrase } : null;
+}
+
+/**
+ * Match by the question's already-computed AnswerPlanner classification
+ * (2026-09-28, user: "use it as only signal" — this is the SOLE matcher on
+ * the live auto-answer path, IntelligenceEngine.ts's WTA V3 skill-injection
+ * site; `matchSkillForMessage` above is no longer consulted there, though it
+ * remains available for other callers, e.g. manual typed chat). A skill only
+ * participates if its author explicitly tagged it with `answerTypes` in
+ * frontmatter — an untagged skill is never selected by this function.
+ *
+ * Category first, then identity: `answerType` narrows to the skills tagged
+ * for this turn's category (deterministic exact-set membership — `answerType`
+ * is itself already a classifier's output, so fuzziness on top of it would
+ * only compound uncertainty). When more than one enabled skill shares that
+ * tag (2026-09-28, user: "we might have same answer type for multiple"),
+ * that alone can't say WHICH one applies — fall back to `matchSkillForMessage`
+ * scoped to just those candidates, so the author's own quoted trigger wording
+ * breaks the tie instead of an arbitrary list-order pick. A single-candidate
+ * category skips this step entirely (its own quoted phrases don't have to
+ * match — the category match already earned it the slot).
+ */
+export function matchSkillByAnswerType(
+    answerType: string | null | undefined,
+    skills: AutoMatchableSkill[],
+    questionText?: string,
+): SkillMatchResult | null {
+    if (!answerType) return null;
+    const candidates = skills.filter((s) => s.answerTypes?.includes(answerType));
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) {
+        return { skillId: candidates[0].id, matchedPhrase: `[answerType:${answerType}]` };
+    }
+    const tieBreak = matchSkillForMessage(String(questionText || ''), candidates);
+    if (tieBreak) return tieBreak;
+    // No candidate's quoted phrases matched the live text either — still
+    // resolve to SOMETHING rather than silently answering with no skill at
+    // all, since the category match is real signal even without a phrase hit.
+    return { skillId: candidates[0].id, matchedPhrase: `[answerType:${answerType}, untied]` };
 }

@@ -4196,7 +4196,12 @@ let isMultimodal = !!(imagePaths?.length);
     if (this.client) {
       for (const modelId of [GEMINI_FLASH_LITE_MODEL, GEMINI_FLASH_MODEL]) {
         try {
-          await this.rateLimiters.gemini.acquire();
+          // Priority acquire (2026-09-28): the judge blocks the entire
+          // auto-answer pipeline — nothing downstream starts until it
+          // returns — while vision/generation calls sharing this same
+          // limiter are comparatively latency-tolerant. Jump the queue
+          // ahead of them instead of waiting in FIFO order.
+          await this.rateLimiters.gemini.acquire(true);
           // @ts-ignore
           const res = await this.client.models.generateContent({
             model: modelId,

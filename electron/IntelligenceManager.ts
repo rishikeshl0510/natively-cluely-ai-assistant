@@ -233,6 +233,9 @@ export class IntelligenceManager extends EventEmitter {
     prefetchAutoAnswer(questionId: string, text: string): void {
         this.engine.prefetchAutoAnswer(questionId, text);
     }
+    abandonSpeculative(questionId: string): void {
+        this.engine.abandonSpeculative(questionId);
+    }
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
         options: { reuseSpeculative: boolean; screenContext?: any; activeSkill?: { id: string; name: string; promptBlock: string } },

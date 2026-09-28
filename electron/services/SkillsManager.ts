@@ -10,6 +10,16 @@ export interface SkillSummary {
   description: string;
   source: SkillSource;
   enabled: boolean;
+  /**
+   * Optional author-declared AnswerType tags (AnswerPlanner.ts's `AnswerType`
+   * union — e.g. 'system_design_answer', 'coding_question_answer'), comma-
+   * separated in frontmatter as `answerTypes: coding_question_answer,
+   * dsa_question_answer`. Lets skillMatcher.matchSkillByAnswerType route a
+   * skill by the question's already-computed classification instead of (or
+   * alongside) a quoted trigger phrase (2026-09-28, user: "answertype should
+   * be tagged"). Absent/empty for a skill that only wants keyword matching.
+   */
+  answerTypes?: string[];
 }
 
 export interface SkillDetails extends SkillSummary {
@@ -579,6 +589,15 @@ function parseSkillMarkdown(content: string, fallbackId: string, source: SkillSo
   const name = metadata.name || fallbackId;
   const id = slugify(name || fallbackId);
   const description = (metadata.description || '').trim();
+  // Comma-separated AnswerType tags, e.g. "coding_question_answer,
+  // dsa_question_answer" -> ['coding_question_answer', 'dsa_question_answer'].
+  // Not validated against AnswerPlanner's actual AnswerType union here — this
+  // module intentionally has no dependency on llm/AnswerPlanner.ts, so an
+  // unrecognized tag just never matches anything rather than failing to load.
+  const answerTypesRaw = (metadata.answerTypes || '').trim();
+  const answerTypes = answerTypesRaw
+    ? answerTypesRaw.split(',').map((t) => t.trim()).filter(Boolean)
+    : undefined;
 
   if (!id) throw new Error('Invalid skill name');
   if (!description) throw new Error('Missing description');
@@ -591,6 +610,7 @@ function parseSkillMarkdown(content: string, fallbackId: string, source: SkillSo
     instructions: body,
     source,
     filePath,
+    ...(answerTypes?.length ? { answerTypes } : {}),
     // NOTE: `enabled` is intentionally OMITTED here. The parser is a pure
     // frontmatter reader — it cannot know whether this skill is currently
     // disabled in the user's .skills-state.json sidecar. The real value is

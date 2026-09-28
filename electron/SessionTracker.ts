@@ -103,6 +103,17 @@ export interface SuggestionTrigger {
      * as extra instructions for whichever kind is chosen.
      */
     activeSkill?: { id: string; name: string; promptBlock: string };
+    /**
+     * This trigger's question is the PRIOR answered question plus more
+     * speech — the interviewer was still completing an utterance an earlier
+     * commit already answered (2026-09-28, user report: "it should continue
+     * from whatever answer it gave, it cannot fully regenerate"). When true,
+     * handleSuggestionTriggerInner injects the previously delivered answer
+     * text into the prompt as an explicit continue-don't-restate directive,
+     * instead of treating this as a brand new question.
+     */
+    isContinuation?: boolean;
+    appendToQuestionId?: string;
 }
 
 // Context item matching Swift ContextManager structure

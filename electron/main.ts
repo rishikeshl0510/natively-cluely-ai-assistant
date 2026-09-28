@@ -3363,6 +3363,7 @@ export class AppState {
         console.warn('[LiveScreenContext] prefetch-signal refresh failed (non-fatal):', err?.message || err);
       });
     },
+    abandonSpeculative: (id) => this.intelligenceManager.abandonSpeculative(id),
     ...((process.env.NATIVELY_AUTO_ANSWER_JUDGE || '').toLowerCase() === 'off' ? {} : {
       judgeCandidate: async (req) => {
         const llm = this.processingHelper?.getLLMHelper?.();

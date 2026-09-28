@@ -1107,6 +1107,30 @@ export class IntelligenceEngine extends EventEmitter {
         if (fastAuto && !previousFastMode) {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
+        // Continuation (2026-09-28, user report: "it should continue from
+        // whatever answer it gave, it cannot fully regenerate"): the
+        // interviewer was still completing an utterance an earlier commit
+        // already answered. Inject the previously delivered answer as an
+        // explicit continue-don't-restate directive instead of letting this
+        // run as a fresh, independent question — the model would otherwise
+        // have no signal that a visible answer already exists and would
+        // write a whole new, differently-worded one.
+        let continuationInstruction: string | undefined;
+        if (trigger.isContinuation) {
+            const priorAnswer = this.session.getLastAssistantMessage('what_to_answer');
+            if (priorAnswer && priorAnswer.trim()) {
+                // This still renders as a NEW, separate, standalone answer (no
+                // bubble-merge — user confirmed that's fine), so it must be the
+                // FULL, complete, self-contained answer to the now-complete
+                // question, not a bare delta fragment. What must NOT happen is
+                // a totally different, independently-worded second take: build
+                // on and stay consistent with the conclusions/approach already
+                // given, extending them to cover what the interviewer added,
+                // rather than reasoning the question through again from zero.
+                continuationInstruction =
+                    `CONTINUATION, NOT A NEW QUESTION: the interviewer was still completing this question when you last answered — you already said: "${priorAnswer.trim()}". They have now finished asking it. Give the FULL, complete, standalone answer to the complete question — this will be shown as the answer, not appended invisibly to the old one, so it must stand on its own. But do NOT reason it through again from scratch or take a different angle: keep the same conclusions and approach as what you already said, and extend/build on that to also cover what the interviewer added since. Avoid the answer reading as an unrelated second take on the same question.`;
+            }
+        }
         try {
             // screenContext: docs/specs/live-screen-context-spec.md — resolved
             // by AppState.resolveLiveScreenContextForAnswer() before dispatch
@@ -1116,6 +1140,7 @@ export class IntelligenceEngine extends EventEmitter {
             await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, {
                 screenContext: trigger.screenContext,
                 activeSkill: trigger.activeSkill,
+                promptInstruction: continuationInstruction,
             });
         } finally {
             this.nextRunIsAutomatic = false;
@@ -1166,10 +1191,36 @@ export class IntelligenceEngine extends EventEmitter {
      * ask, so a whole meeting of exposition does not each start a generation.
      */
     prefetchAutoAnswer(questionId: string, text: string): void {
-        if (this.activeMode !== 'idle' && this.activeMode !== 'assist') return;
-        if (this.speculativeText !== null) return;
-        if (this.speculativeTimer !== null) return;
-        if (Date.now() - this.lastTriggerTime < this.triggerCooldown) return;
+        if (this.activeMode !== 'idle' && this.activeMode !== 'assist') {
+            console.log(`[IntelligenceEngine] Auto Answer prefetch skipped: engine busy (activeMode=${this.activeMode})`, { questionId });
+            return;
+        }
+        // EXPIRY-AWARE (2026-09-28, live session: "it suddenly stopped
+        // prefetching" — traced to this guard checking only `!== null`, not
+        // whether that leftover speculative text was still live. Elsewhere
+        // (line ~1363, the reuse-eligibility check) "still usable" is
+        // defined as `speculativeText !== null && now <= speculativeTextExpiry`
+        // — this gate used a different, looser definition and could stay
+        // permanently blocked by an orphaned speculative result that was
+        // never adopted or explicitly cleared, long after it stopped being
+        // usable for anything.
+        if (this.speculativeText !== null) {
+            if (Date.now() <= this.speculativeTextExpiry) {
+                console.log(`[IntelligenceEngine] Auto Answer prefetch skipped: an unexpired speculative result is already held`, { questionId, forQuestionId: this.speculativeQuestionId });
+                return;
+            }
+            console.log(`[IntelligenceEngine] Auto Answer prefetch: clearing an EXPIRED orphaned speculative result before starting a new one`, { staleQuestionId: this.speculativeQuestionId });
+            this.speculativeText = null;
+            this.speculativeTextExpiry = Infinity;
+        }
+        if (this.speculativeTimer !== null) {
+            console.log(`[IntelligenceEngine] Auto Answer prefetch skipped: a speculative timer is already running`, { questionId });
+            return;
+        }
+        if (Date.now() - this.lastTriggerTime < this.triggerCooldown) {
+            console.log(`[IntelligenceEngine] Auto Answer prefetch skipped: inside the trigger cooldown`, { questionId });
+            return;
+        }
         const trimmed = (text ?? '').trim();
         if (trimmed.length < 12) return;
         this.currentAutoCandidateId = questionId;
@@ -1177,6 +1228,30 @@ export class IntelligenceEngine extends EventEmitter {
         console.log(`[IntelligenceEngine] Auto Answer prefetch fired while the judge decides`, { questionId, length: trimmed.length });
         this.runWhatShouldISay(trimmed, 0.9, undefined, { speculative: true })
             .catch(err => console.error('[IntelligenceEngine] Auto Answer prefetch error:', err));
+    }
+
+    /**
+     * SimpleAutoAnswer's judge decided a prefetched candidate will never be
+     * used — release its finished-but-unclaimed speculative result NOW
+     * rather than leaving it to occupy the engine's one speculative slot
+     * until its own expiry (2026-09-28, live session: a judge timeout on one
+     * turn held this slot long enough to deny the very next, genuinely
+     * answerable turn its own prefetch head start).
+     *
+     * Deliberately narrow: only clears `speculativeText`/`speculativeTextExpiry`
+     * (the exact gate `prefetchAutoAnswer` checks), and only when `questionId`
+     * still matches what's actually held — a NEWER prefetch already
+     * superseding this one owns that state now and must not be clobbered.
+     * Does not touch `activeMode` or abort an in-flight stream: a prefetch
+     * still ACTIVELY streaming isn't "orphaned", it's busy, which is already
+     * its own legitimate skip reason for the next candidate.
+     */
+    abandonSpeculative(questionId: string): void {
+        if (this.speculativeQuestionId !== questionId) return;
+        if (this.speculativeText === null) return;
+        console.log(`[IntelligenceEngine] Auto Answer prefetch abandoned (judge won't use it)`, { questionId });
+        this.speculativeText = null;
+        this.speculativeTextExpiry = Infinity;
     }
 
     /**
@@ -1348,6 +1423,7 @@ export class IntelligenceEngine extends EventEmitter {
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
+        isContinuation?: boolean; appendToQuestionId?: string;
     }, options: { reuseSpeculative: boolean; context: string; screenContext?: any; activeSkill?: { id: string; name: string; promptBlock: string } }): Promise<void> {
         return this.handleSuggestionTrigger({
             context: options.context,
@@ -1363,6 +1439,8 @@ export class IntelligenceEngine extends EventEmitter {
             reuseSpeculative: options.reuseSpeculative,
             screenContext: options.screenContext,
             activeSkill: options.activeSkill,
+            isContinuation: question.isContinuation,
+            appendToQuestionId: question.appendToQuestionId,
         });
     }
 
@@ -3642,16 +3720,24 @@ export class IntelligenceEngine extends EventEmitter {
                     // matchSkillForMessage is a plain string scan.
                     let _skillPromptBlock = '';
                     try {
-                        const { matchSkillForMessage } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
+                        // answerType-only routing (2026-09-28, user: "use it as
+                        // only signal" / "answertype should be tagged"): this
+                        // turn's AnswerPlanner classification — already
+                        // computed above for the coding-contract trigger, so
+                        // this adds no extra cost — is the sole signal for
+                        // which skill applies here. A skill only participates
+                        // if its author explicitly tagged it with matching
+                        // `answerTypes` in frontmatter; an untagged skill is
+                        // never selected by this path (see SKILL_AUTHORING.md).
+                        const { matchSkillByAnswerType } = require('./services/skills/skillMatcher') as typeof import('./services/skills/skillMatcher');
                         const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
                         const enabledSkills = SkillsManager.getInstance().listSkills().filter((s: any) => s.enabled !== false);
-                        const questionText = String(wtaTurnQuestion || '');
-                        const autoMatch = questionText ? matchSkillForMessage(questionText, enabledSkills) : null;
+                        const autoMatch = matchSkillByAnswerType(answerPlan.answerType, enabledSkills, String(wtaTurnQuestion || ''));
                         if (autoMatch) {
                             const autoSkill = SkillsManager.getInstance().getSkill(autoMatch.skillId);
                             if (autoSkill) {
                                 _skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(autoSkill);
-                                console.log(`[IntelligenceEngine] Skill auto-triggered on live turn: ${autoSkill.id} (matched "${autoMatch.matchedPhrase}")`);
+                                console.log(`[IntelligenceEngine] Skill auto-triggered on live turn: ${autoSkill.id} (answerType=${answerPlan.answerType})`);
                             }
                         }
                     } catch (skillErr: any) {
@@ -3943,7 +4029,9 @@ export class IntelligenceEngine extends EventEmitter {
                         // rather than threaded through personaBase, so a skill
                         // can layer guidance on top of whatever contract
                         // (coding, what_to_say, etc.) the turn already composed.
-                        system: _skillPromptBlock ? `${_v3.system}\n\n## ACTIVE SKILL\n${_skillPromptBlock}` : _v3.system,
+                        system: _skillPromptBlock
+                            ? `${_v3.system}\n\n## ACTIVE SKILL (GOVERNS THIS TURN)\nA skill matched this question. Its instructions below define the shape and content of your answer for this turn — follow them as the authoritative format, not as one more option to weigh against the general formatting/contract instructions above. Where the skill's instructions conflict with earlier formatting guidance (structure, sections, voice), the skill wins; only the safety, evidence-grounding, and factual-accuracy rules above still apply.\n\n${_skillPromptBlock}`
+                            : _v3.system,
                         user: _v3.user,
                         // T4: the evidence this prompt was composed from. The
                         // post-stream doc-grounded validator uses THIS rather

@@ -37,7 +37,13 @@ export const ACTIVE_SKILL_HEADING = '## ACTIVE SKILL';
  *   duplicate it.
  * - V3 prompt, no skill -> exactly the V3 prompt. Byte-identical to the old
  *   behaviour, which is what keeps this change inert for non-skill turns.
- * - V3 prompt + skill -> V3 prompt with the skill block appended.
+ * - V3 prompt + skill -> V3 prompt with the skill block appended, framed as
+ *   GOVERNING this turn (2026-09-28, user: "make the skill a contract") —
+ *   previously a passive footer the model could weigh however it liked
+ *   against the mode/contract instructions already composed above it, which
+ *   in practice usually lost. Safety/evidence rules already in
+ *   `v3SystemPrompt` still apply; only formatting/structure precedence
+ *   shifts to the skill.
  */
 export function composeWtaSystemPrompt(
     v3SystemPrompt: string | null | undefined,
@@ -46,5 +52,5 @@ export function composeWtaSystemPrompt(
 ): string {
     if (!v3SystemPrompt) return legacyPromptOverride;
     if (!activeSkill?.promptBlock) return v3SystemPrompt;
-    return `${v3SystemPrompt}\n\n${ACTIVE_SKILL_HEADING}\n${activeSkill.promptBlock}`;
+    return `${v3SystemPrompt}\n\n${ACTIVE_SKILL_HEADING} (GOVERNS THIS TURN)\nA skill matched this question. Its instructions below define the shape and content of your answer for this turn — follow them as the authoritative format, not as one more option to weigh against the general formatting/contract instructions above. Where the skill's instructions conflict with earlier formatting guidance (structure, sections, voice), the skill wins; only the safety, evidence-grounding, and factual-accuracy rules above still apply.\n\n${activeSkill.promptBlock}`;
 }

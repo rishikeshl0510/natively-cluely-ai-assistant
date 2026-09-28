@@ -214,8 +214,25 @@ export const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
  * than waiting indefinitely.
  */
 export const INCOMPLETE_EXTRA_WAIT_MS = 1500;
-/** Debounce for the candidate-uncertainty path, mirroring STABILITY_MS. */
-export const CANDIDATE_STABILITY_MS = 1200;
+/**
+ * Debounce for the candidate-uncertainty path, mirroring STABILITY_MS
+ * (900ms). Was left at the old 1200ms when STABILITY_MS was reverted
+ * earlier tonight — same "should trigger immediately" complaint applies
+ * here too, and there's no reason candidate feedback should lag interviewer
+ * feedback by 300ms extra.
+ */
+export const CANDIDATE_STABILITY_MS = 900;
+/**
+ * How recently the last answer must have been delivered for a new stoppage
+ * to be considered a CONTINUATION of it rather than a fresh question (2026-
+ * 09-28, user report: an early/premature answer to a still-forming question,
+ * followed by the interviewer finishing that same question, was re-judged
+ * from scratch and produced a whole new, differently-worded answer instead
+ * of extending the one already on screen). 12s is generous enough to cover
+ * a real pause mid-thought without being so wide it catches a genuinely new,
+ * unrelated question that happens to start with similar words.
+ */
+export const CONTINUATION_MAX_GAP_MS = 12_000;
 /**
  * INVESTIGATED AND REJECTED (2026-09-28): keeping `pending` populated after
  * dispatch, so a fast follow-up final stitches onto the just-answered
@@ -268,6 +285,19 @@ export interface SimpleAutoAnswerHost {
     speculativeSnapshot?(): { questionId: string | null; text: string | null };
     /** Start the answer WHILE the judge decides (see PREFETCH_MIN_ANSWERABILITY). */
     prefetchAnswer?(questionId: string, text: string): void;
+    /**
+     * The judge decided THIS prefetched candidate will never be used (a
+     * timeout/error, an unparseable reply with no fallback, or a real
+     * negative/below-floor verdict) — release its speculative slot NOW
+     * rather than leaving it to occupy the engine's one speculative slot
+     * until its own natural expiry (2026-09-28, live session: a judge
+     * timeout on one turn held the slot long enough to deny the very next,
+     * genuinely answerable turn its own prefetch head start, forcing it to
+     * generate cold instead of adopting a warm stream). A no-op if this
+     * questionId is no longer the one currently held (already superseded by
+     * a newer prefetch) — never clears state a NEWER candidate now owns.
+     */
+    abandonSpeculative?(questionId: string): void;
     modeName?(): string | null;
     telemetry?(event: AutoAnswerTelemetryEvent): void;
     log?(line: string): void;
@@ -313,6 +343,9 @@ export class SimpleAutoAnswerEngine {
     private sequence = 0;
     private lastJudgedKey = '';
     private lastAnsweredText: string | null = null;
+    /** id/timestamp of the last DELIVERED answer, for continuation detection (see CONTINUATION_MAX_GAP_MS). */
+    private lastAnsweredQuestionId: string | null = null;
+    private lastAnsweredAt = 0;
     /** The automatic answer currently inside its feedback window. */
     private feedbackPending: { id: string; at: number; act: AutoAnswerQuestion['dialogueAct']; answerability: number } | null = null;
     private feedbackTimer: ClockTimer | null = null;
@@ -346,8 +379,22 @@ export class SimpleAutoAnswerEngine {
     private thresholds: AutoAnswerThresholds;
     /** Candidate key already granted its one INCOMPLETE_EXTRA_WAIT_MS extension — see the constant's note. */
     private incompleteExtendedKey: string | null = null;
-    /** The candidate-uncertainty path's own pending utterance and debounce timer — deliberately separate from `pending`/`timer` so it can never merge with or disrupt interviewer-side state. */
-    private candidateCandidate: { text: string; at: number } | null = null;
+    /**
+     * The candidate-uncertainty path's own pending utterances and debounce
+     * timer — deliberately separate from `pending`/`timer` so it can never
+     * merge with or disrupt interviewer-side state. An ARRAY (fixed
+     * 2026-09-28): the candidate can speak several FINAL segments before the
+     * debounce fires — STT providers commonly cut finals at clause
+     * boundaries — and a single `{text, at}` slot was overwriting itself on
+     * every final, so only the LAST fragment of a longer utterance ever
+     * reached the judge ("should I use a hashmap here, since the array isn't
+     * sorted" arriving as two finals judged only "since the array isn't
+     * sorted"). Accumulate like `pending` does and join the same way.
+     */
+    private candidateParts: { text: string; at: number }[] = [];
+    /** Latest candidate interim when the provider never finalized it — see onCandidateStoppage's fallback. */
+    private lastCandidateInterim = '';
+    private lastCandidateInterimAt = 0;
     private candidateTimer: ClockTimer | null = null;
 
     constructor(
@@ -455,9 +502,22 @@ export class SimpleAutoAnswerEngine {
         // pattern-matched). A cheap word-count floor stays, matching the
         // interviewer channel's own cost discipline — a single word is never
         // worth a judge call either way.
-        if (!segment.final || !text) return;
+        if (!text) return;
         if (text.split(/\s+/).filter(Boolean).length < 2) return;
-        this.candidateCandidate = { text, at: now };
+        // PROVIDER NEVER FINALIZED (2026-09-28, same root cause and fix as
+        // onStoppage's interviewer-side one): arm/re-arm the debounce on
+        // EVERY candidate text update, final or not, and track the latest
+        // interim so the timer firing (our own utterance boundary) has
+        // something to act on even when the provider's `final` never comes.
+        // Previously this branch did nothing at all on an interim — worse
+        // than the interviewer path, which at least re-armed its timer.
+        if (segment.final) {
+            this.candidateParts.push({ text, at: now });
+            this.lastCandidateInterim = '';
+        } else {
+            this.lastCandidateInterim = text;
+            this.lastCandidateInterimAt = now;
+        }
         if (this.candidateTimer) this.clock.clearTimeout(this.candidateTimer);
         this.candidateTimer = this.clock.setTimeout(() => {
             this.candidateTimer = null;
@@ -467,17 +527,34 @@ export class SimpleAutoAnswerEngine {
 
     /**
      * Commit point for the candidate-uncertainty path. Deliberately yields to
-     * an interviewer question still forming (`pending.length > 0`) — the
-     * interviewer's own turn always takes precedence, and consult()'s `parts`
-     * is sourced from `pending`, so firing here while it's non-empty would mix
-     * the two speakers' text into one judge call.
+     * an interviewer question still forming — the interviewer's own turn
+     * always takes precedence.
+     *
+     * "Still forming" is `this.timer !== null` (the interviewer stoppage
+     * timer is armed), NOT `pending.length > 0` (fixed 2026-09-28: `pending`
+     * is only cleared on a successful DISPATCH — see `deliver()` — so any
+     * interviewer utterance that gets judged "no" or ignored, which is most
+     * ordinary speech, left stale entries sitting in `pending` for up to
+     * PENDING_MAX_AGE_MS = 90s with no re-check until the interviewer spoke
+     * again. That made this guard true almost continuously in a real
+     * conversation, silently dropping nearly every candidate-directed
+     * stoppage. The armed timer is a live, self-clearing signal of "the
+     * interviewer is actively mid-utterance right now" instead.)
      */
     private onCandidateStoppage(): void {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
-        const c = this.candidateCandidate;
-        this.candidateCandidate = null;
-        if (!c || this.pending.length > 0) return;
-        const candidate = c.text.trim();
+        const parts = this.candidateParts;
+        this.candidateParts = [];
+        // PROVIDER NEVER FINALIZED fallback (2026-09-28) — see the matching
+        // comment on onStoppage's interviewer-side version for the full
+        // rationale. Only when there were no real finals at all (`parts`
+        // empty): a genuine final always wins over stale interim text.
+        if (parts.length === 0 && this.lastCandidateInterim) {
+            parts.push({ text: this.lastCandidateInterim, at: this.lastCandidateInterimAt });
+            this.lastCandidateInterim = '';
+        }
+        if (parts.length === 0 || this.timer !== null) return;
+        const candidate = joinTranscriptParts(parts).trim();
         if (!candidate) return;
         const key = normalizeForCompare(candidate);
         if (key === this.lastJudgedKey) return;
@@ -518,6 +595,27 @@ export class SimpleAutoAnswerEngine {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
         const now = this.clock.now();
         this.pending = this.pending.filter(p => now - p.at <= PENDING_MAX_AGE_MS);
+        // PROVIDER NEVER FINALIZED (2026-09-28, user: "I have built this
+        // utterance boundaries myself in SimpleAutoAnswer" — this quiet-timer
+        // IS the boundary; it must not still defer to the provider's own
+        // `final` flag underneath it). `pending` is only ever pushed to from
+        // ingest()'s `segment.final` branch — a provider that sits silent for
+        // an entire utterance without ever setting `final` (live-confirmed:
+        // Google STT, a whole session, zero finals on either channel) leaves
+        // `pending` permanently empty even though THIS timer — armed and
+        // re-armed on every interim, exactly like the final path — correctly
+        // fired the instant the interims stopped arriving. Promote the
+        // accumulated interim text to a synthetic final so a provider that
+        // never finalizes doesn't leave automatic answering permanently
+        // inert. Commit-pass only (`!early`): the early pass (120ms) is a
+        // speculative judge head-start whose verdict gets HELD until this
+        // real commit point anyway, and pushing here on BOTH passes would
+        // double-push if a genuine final for the same text then arrived
+        // between them.
+        if (this.pending.length === 0 && !early && this.lastInterviewerInterim) {
+            this.pending.push({ text: this.lastInterviewerInterim, at: this.lastInterviewerAt || now });
+            this.lastInterviewerInterim = '';
+        }
         if (this.pending.length === 0) return;
         const candidate = joinTranscriptParts(this.pending);
         const key = normalizeForCompare(candidate);
@@ -560,6 +658,23 @@ export class SimpleAutoAnswerEngine {
             this.emit({ name: 'auto_answer_ignored', skipReason: 'duplicate' });
             return;
         }
+        // Continuation of the last answered question: the interviewer was
+        // still completing an utterance an earlier commit already answered
+        // (early/premature commit, or they simply kept elaborating), rather
+        // than asking something new. A PROPER prefix match — the prior
+        // answered text plus genuinely more words — within
+        // CONTINUATION_MAX_GAP_MS of that delivery. `lastJudgedKey` is NOT
+        // used for this check (it tracks the last JUDGED key, which
+        // `applicableHeld`/dedup above already handle); this compares against
+        // what was actually DELIVERED, which is the thing on screen.
+        let continuationOf: string | null = null;
+        if (this.lastAnsweredQuestionId && this.lastAnsweredText
+            && now - this.lastAnsweredAt <= CONTINUATION_MAX_GAP_MS) {
+            const priorKey = normalizeForCompare(this.lastAnsweredText);
+            if (priorKey.length > 0 && key.length > priorKey.length && key.startsWith(priorKey)) {
+                continuationOf = this.lastAnsweredQuestionId;
+            }
+        }
         // Commit-only: a candidate that still trails off mid-sentence gets ONE
         // extra window rather than being judged and answered as-is — see
         // INCOMPLETE_EXTRA_WAIT_MS. `early` never commits, so it's exempt (an
@@ -585,7 +700,7 @@ export class SimpleAutoAnswerEngine {
         // candidate, so the dispatch below can claim it by id.
         this.host.noteCandidate?.(id, this.sequence);
         this.maybePrefetch(id, candidate, now);
-        void this.consult(id, candidate, now, early);
+        void this.consult(id, candidate, now, early, 'interviewer', continuationOf);
     }
 
     /**
@@ -618,7 +733,7 @@ export class SimpleAutoAnswerEngine {
         } catch { /* prefetch is an optimisation; never break the pipeline */ }
     }
 
-    private async consult(id: string, candidate: string, committedAt: number, early = false, perspective: 'interviewer' | 'candidate' = 'interviewer'): Promise<void> {
+    private async consult(id: string, candidate: string, committedAt: number, early = false, perspective: 'interviewer' | 'candidate' = 'interviewer', continuationOf: string | null = null): Promise<void> {
         const seq = this.judgeSeq;
         const generation = this.host.meetingGeneration();
         let timer: ClockTimer | null = null;
@@ -675,9 +790,21 @@ export class SimpleAutoAnswerEngine {
                 `superseded ${id} by ${this.judgeSeqCause ?? 'unknown'} after ${judgeMs}ms`
                 + (verdict ? ` — it had said ${verdict.isAsk ? 'ASK' : 'not-ask'} a=${verdict.answerability}` : ''),
                 candidate);
+            // Unconditional (2026-09-28, live session: "it didn't answer at
+            // all, it is just stuck" / "not triggering on my testing" —
+            // traced back to THIS branch having no visible-by-default trace
+            // at all, unlike the timeout/error/unparseable branch below,
+            // which does. A candidate that gets superseded repeatedly before
+            // its judge call ever survives long enough to dispatch looks
+            // identical to "nothing is happening" without this — the content
+            // trace above is gated behind a separate debug flag most users
+            // never enable.
+            _atrace(`${id} superseded by ${this.judgeSeqCause ?? 'unknown'} after ${judgeMs}ms`
+                + (verdict ? ` — verdict was ${verdict.isAsk ? 'ASK' : 'not-ask'} a=${verdict.answerability} (${verdict.answerability > ANSWER_FLOOR ? 'held for next stoppage' : 'discarded, below floor'})` : ' — no verdict (timed out/errored before supersede)'));
             // Defer, don't discard. Only a POSITIVE verdict is held: a silent
             // one must not veto the grown candidate, because the ask may be in
             // the very words that superseded it.
+            let heldThisOne = false;
             if (verdict && this.host.isMeetingActive() && this.host.meetingGeneration() === generation) {
                 const superseded = routeForVerdict(verdict);
                 if (superseded.route === 'evaluate' && superseded.action === 'answer'
@@ -687,8 +814,12 @@ export class SimpleAutoAnswerEngine {
                         text: superseded.questionText ?? candidate,
                         answerability: superseded.answerability, act: superseded.act, at: this.clock.now(),
                     };
+                    heldThisOne = true;
                 }
             }
+            // Release the speculative slot for a superseded candidate with
+            // nothing worth holding — see abandonSpeculative's own doc.
+            if (!heldThisOne) this.host.abandonSpeculative?.(id);
             return;
         }
         if (!verdict) {
@@ -714,6 +845,10 @@ export class SimpleAutoAnswerEngine {
             if (willFallbackDispatch) {
                 this.host.log?.(`[AutoAnswer:simple] judge ${outcome} — fallback dispatch`);
                 this.deliver(id, candidate, 0.9, 'general_question', committedAt);
+            } else {
+                // Nothing will adopt this prefetch — free it now rather than
+                // waiting out its own expiry (see abandonSpeculative's doc).
+                this.host.abandonSpeculative?.(id);
             }
             return;
         }
@@ -732,6 +867,7 @@ export class SimpleAutoAnswerEngine {
             const reason = route.route === 'wait_incomplete' ? 'incomplete' : route.reason;
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: reason, dialogueAct: verdict.act, answerability: verdict.answerability });
             if (route.route === 'wait_incomplete') this.lastJudgedKey = '';   // more speech may finish it → re-judge then
+            this.host.abandonSpeculative?.(id);
             return;
         }
         const text = route.questionText ?? candidate;
@@ -750,14 +886,15 @@ export class SimpleAutoAnswerEngine {
                 this.held = { id, key: normalizeForCompare(candidate), text, answerability: route.answerability, act: route.act, at: this.clock.now() };
                 return;
             }
-            this.deliver(id, text, route.answerability, route.act, committedAt);
+            this.deliver(id, text, route.answerability, route.act, committedAt, continuationOf);
         } else {
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'low_answerability', answerability: route.answerability });
+            this.host.abandonSpeculative?.(id);
         }
     }
 
     /** Dispatch now, or retry while the engine is busy — woken early by onEngineIdle. */
-    private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): void {
+    private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number, continuationOf: string | null = null): void {
         const deadline = this.clock.now() + RETRY_TTL_MS;
         const seqAtDeliver = this.judgeSeq;
         const attempt = () => {
@@ -818,7 +955,7 @@ export class SimpleAutoAnswerEngine {
                 return;
             }
             this.parkedAttempt = null;
-            const q = this.question(id, text, answerability, act, committedAt);
+            const q = this.question(id, text, answerability, act, committedAt, continuationOf);
             // If the engine already has an answer in flight for THIS question
             // (our prefetch, or its own interim speculation keyed by
             // noteCandidate), adopt it instead of starting over — that is the
@@ -826,6 +963,8 @@ export class SimpleAutoAnswerEngine {
             const snapshot = this.host.speculativeSnapshot?.();
             const reuseSpeculative = Boolean(snapshot && snapshot.questionId === id && snapshot.text);
             this.lastAnsweredText = text;
+            this.lastAnsweredQuestionId = id;
+            this.lastAnsweredAt = this.clock.now();
             this.pending = [];
             this.lastJudgedKey = '';
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
@@ -836,7 +975,7 @@ export class SimpleAutoAnswerEngine {
         attempt();
     }
 
-    private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): AutoAnswerQuestion {
+    private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number, continuationOf: string | null = null): AutoAnswerQuestion {
         const now = this.clock.now();
         return {
             id, text,
@@ -848,6 +987,7 @@ export class SimpleAutoAnswerEngine {
             sourceSegments: this.pending.map(p => p.at),
             candidateGeneration: this.sequence,
             meetingGeneration: this.host.meetingGeneration(),
+            ...(continuationOf ? { isContinuation: true, appendToQuestionId: continuationOf } : {}),
         };
     }
 
@@ -912,11 +1052,15 @@ export class SimpleAutoAnswerEngine {
         this.speakerByTurn.clear();
         this.lastJudgedKey = '';
         this.lastAnsweredText = null;
+        this.lastAnsweredQuestionId = null;
+        this.lastAnsweredAt = 0;
         this.lastPrefetchAt = null;
         this.held = null;
         this.incompleteExtendedKey = null;
         if (this.candidateTimer) { this.clock.clearTimeout(this.candidateTimer); this.candidateTimer = null; }
-        this.candidateCandidate = null;
+        this.candidateParts = [];
+        this.lastCandidateInterim = '';
+        this.lastCandidateInterimAt = 0;
         this.bumpJudgeSeq('meeting_reset');
         this.sequence = 0;
     }

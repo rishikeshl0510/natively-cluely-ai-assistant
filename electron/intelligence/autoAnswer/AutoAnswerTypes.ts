@@ -73,6 +73,22 @@ export interface AutoAnswerQuestion {
     /** Generation counters for the stale-answer guards (V2 §28/§46). */
     candidateGeneration: number;
     meetingGeneration: number;
+
+    /**
+     * This question's text is the PRIOR answered question plus more speech —
+     * the interviewer was still completing the same utterance an early
+     * commit already answered, not asking something new (2026-09-28, user
+     * report: continuing after a premature answer produced a whole
+     * differently-worded replacement instead of an extension). NOT the same
+     * thing as `isFollowUp` — that is a separate, later question referring
+     * back to an already-finished exchange ("tell me more about that").
+     * When true, the answer should extend what's already shown rather than
+     * restate it, and the UI should append to the existing bubble named by
+     * `appendToQuestionId` rather than open a new one.
+     */
+    isContinuation?: boolean;
+    /** The prior AutoAnswerQuestion.id this continues, when isContinuation is true. */
+    appendToQuestionId?: string;
 }
 
 /** The detector's verdict on a candidate (V2 §4, §9). */

@@ -117,3 +117,86 @@ describe('matchSkillForMessage', () => {
     assert.equal(result, null);
   });
 });
+
+describe('matchSkillByAnswerType', () => {
+  test('matches a skill whose answerTypes includes this turn\'s classification', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'system-design-skill', description: 'irrelevant here', answerTypes: ['system_design_answer'] },
+      { id: 'coding-skill', description: 'irrelevant here', answerTypes: ['coding_question_answer', 'dsa_question_answer'] },
+    ];
+    const result = matchSkillByAnswerType('system_design_answer', skills);
+    assert.equal(result?.skillId, 'system-design-skill');
+  });
+
+  test('a skill with no answerTypes tag is never selected', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'untagged-skill', description: 'no answerTypes field at all' },
+    ];
+    const result = matchSkillByAnswerType('coding_question_answer', skills);
+    assert.equal(result, null, 'an untagged skill must not fire on answerType routing');
+  });
+
+  test('no answerType classification (null/undefined) matches nothing', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'coding-skill', description: 'x', answerTypes: ['coding_question_answer'] },
+    ];
+    assert.equal(matchSkillByAnswerType(null, skills), null);
+    assert.equal(matchSkillByAnswerType(undefined, skills), null);
+  });
+
+  test('an answerType with no matching skill tag returns null (no false positive)', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'coding-skill', description: 'x', answerTypes: ['coding_question_answer'] },
+    ];
+    const result = matchSkillByAnswerType('negotiation_answer', skills);
+    assert.equal(result, null);
+  });
+
+  test('with no question text and no quoted phrases on either candidate, falls through to the first one (no crash, no null)', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'first-skill', description: 'x', answerTypes: ['behavioral_interview_answer'] },
+      { id: 'second-skill', description: 'y', answerTypes: ['behavioral_interview_answer'] },
+    ];
+    const result = matchSkillByAnswerType('behavioral_interview_answer', skills);
+    assert.equal(result?.skillId, 'first-skill');
+  });
+
+  test('TIE-BREAK (2026-09-28): two skills sharing an answerType are disambiguated by quoted trigger phrase, not list order', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'general-behavioral', description: 'Use for "tell me about yourself" or "why do you want this role".', answerTypes: ['behavioral_interview_answer'] },
+      { id: 'fde-behavioral', description: 'Use for "how would you handle" or "walk me through a time".', answerTypes: ['behavioral_interview_answer'] },
+    ];
+    // The live question text matches the SECOND skill's phrase, not the first's —
+    // a naive first-wins pick would return the wrong skill here.
+    const result = matchSkillByAnswerType('behavioral_interview_answer', skills, 'How would you handle a production outage at 2am?');
+    assert.equal(result?.skillId, 'fde-behavioral', 'the quoted-phrase tie-break must override list order');
+  });
+
+  test('TIE-BREAK: when neither shared-tag candidate\'s phrases match, still resolves to a candidate rather than null', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'skill-a', description: 'Use for "some specific phrase".', answerTypes: ['negotiation_answer'] },
+      { id: 'skill-b', description: 'Use for "another specific phrase".', answerTypes: ['negotiation_answer'] },
+    ];
+    const result = matchSkillByAnswerType('negotiation_answer', skills, 'what is your notice period');
+    assert.ok(result, 'the category match alone is real signal — must not silently answer with no skill');
+    assert.equal(result.skillId, 'skill-a', 'falls through to the first candidate when the tie-break itself finds nothing');
+  });
+
+  test('a SINGLE candidate for the answerType is returned even if its own quoted phrases don\'t match the live text', async () => {
+    const { matchSkillByAnswerType } = await loadModule();
+    const skills = [
+      { id: 'only-candidate', description: 'Use for "some other wording entirely".', answerTypes: ['dsa_question_answer'] },
+    ];
+    // The category match alone is enough for a lone candidate — it must not
+    // additionally have to win its own phrase check.
+    const result = matchSkillByAnswerType('dsa_question_answer', skills, 'completely unrelated live transcript text');
+    assert.equal(result?.skillId, 'only-candidate');
+  });
+});
