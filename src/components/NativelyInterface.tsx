@@ -1801,7 +1801,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const contentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const rafDimUpdateRef = useRef<number | null>(null);
-  const codeExpandedRef = useRef(false);
+  // Defaults to expanded (2026-09-29, user request: "expanded state is the
+  // default state" — the user can still manually contract via the existing
+  // resize toggle; this only changes what the panel boots into). Must stay
+  // in lockstep with shellWidth's own initial value below — codeExpandedRef
+  // is a derived "is the panel currently wide" flag, not an independent
+  // source of truth, so seeding one without the other reproduces exactly
+  // the state-mismatch bug the collapsed-default comment used to warn about.
+  const codeExpandedRef = useRef(true);
   // Set when token streaming has proven the current row is code before React has
   // mounted a [data-code-msg] row. While true, the visibility scanner must not
   // immediately contradict eager expansion and schedule a collapse.
@@ -2370,12 +2377,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // The size reporters ask for this, not for the effective width.
   const requestedWindowWidthRef = useRef(REQUESTED_WINDOW_WIDTH);
   requestedWindowWidthRef.current = REQUESTED_WINDOW_WIDTH;
-  // The PANEL always starts COLLAPSED. A restored custom size sizes the
-  // WINDOW, not the panel's expand state — seeding the panel with the window
-  // width would boot it visually expanded while codeExpandedRef and
-  // isShellWide both still read "collapsed".
+  // The PANEL now starts EXPANDED by default (2026-09-29, user request —
+  // was COLLAPSED before). A restored custom size still sizes the WINDOW,
+  // not the panel's own expand state, so this seeds the panel at its full
+  // (non-collapsed) width to stay in lockstep with codeExpandedRef and
+  // isShellWide, which were flipped to `true`/`false`→`true` alongside this
+  // — seeding only one of the three would reproduce the exact
+  // state-mismatch this comment used to warn against, just inverted.
   const shellWidth = useMotionValue(
-    collapsedWidthFor(restoredOverlaySize.width ?? OVERLAY_DEFAULT_WINDOW_WIDTH),
+    restoredOverlaySize.width ?? OVERLAY_DEFAULT_WINDOW_WIDTH,
   );
   // Vertical budget cap for the chat scroll area. Default Infinity = "not yet
   // measured / unbounded", so the width-derived aesthetic max applies until we
@@ -2483,7 +2493,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // icon always reflects the real width no matter who drove it. The subscription
   // flips this at most once per transition (low frequency), so it's render-safe
   // even though the underlying motion value updates every frame.
-  const [isShellWide, setIsShellWide] = useState(false);
+  const [isShellWide, setIsShellWide] = useState(true);
 
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
@@ -9716,6 +9726,19 @@ Provide only the answer, nothing else.`;
               }}
             >
               {isGlassTheme && <GlassEffectLayer parentRef={shellRef} cornerRadius={24} />}
+
+              {/* Always-present drag handle (2026-09-29, user: "I should be
+                  able to drag easily" / "draggable at all times"). Every
+                  content section below this is explicitly `no-drag` (so
+                  text/buttons/scrolling keep working), and the one header
+                  strip that wasn't only renders when hasStatusPill is true —
+                  so in the common case (no status pill showing) the panel
+                  had NO reliably-draggable area at all. This is a thin,
+                  unconditional strip at the very top of the shell, inside
+                  the already-draggable-area parent, so the window is always
+                  grabbable from a fixed, predictable spot regardless of what
+                  content is showing below it. */}
+              <div className="w-full h-3 shrink-0" />
 
               {hasStatusPill && (
               <div className="relative no-drag flex flex-wrap items-center justify-center gap-1.5 px-4 pt-3 pb-1">

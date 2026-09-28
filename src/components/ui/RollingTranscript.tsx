@@ -111,7 +111,7 @@ const RollingTranscript: React.FC<RollingTranscriptProps> = ({
                                         <span className={`w-[5px] h-[5px] rounded-full ${micDotClass}`} />
                                     </div>
                                 </div>
-                                <span className="text-[13px] italic leading-7 text-[var(--overlay-text-muted)] transition-all duration-300 whitespace-pre-wrap break-words">
+                                <span className="text-[13px] italic leading-7 text-[var(--overlay-text-primary)] transition-all duration-300 whitespace-pre-wrap break-words">
                                     {text || t('Listening…')}
                                     {isActive && isNormal && (
                                         <span className="inline-flex items-center ml-2 align-middle">
